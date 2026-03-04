@@ -671,6 +671,7 @@ func (dm *DelegateManager) buildRunRequest(task *DelegationTask, message string)
 			"- Your complete response will be returned to the requesting agent.\n" +
 			"- Do NOT try to communicate with the end user directly.\n" +
 			"- Do NOT use your persona name or self-references (e.g. do not say your name). Write factual, neutral content.\n" +
-			"- Be concise and deliver actionable results.",
+			"- Be concise and deliver actionable results.\n" +
+			"- IMPORTANT: If the delegated task falls outside your expertise scope (as defined in your SOUL.md), politely refuse and explain that this task is not within your domain. Do NOT attempt tasks outside your scope.",
 	}
 }
