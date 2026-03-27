@@ -31,7 +31,7 @@ interface UiState {
 export const useUiStore = create<UiState>()(
   persist(
     (set) => ({
-      theme: 'dark',
+      theme: 'light',
       locale: 'en',
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       sidebarOpen: true,
