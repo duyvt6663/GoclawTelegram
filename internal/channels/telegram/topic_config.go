@@ -11,14 +11,15 @@ import (
 // Fields are resolved in order: global TelegramConfig → wildcard group ("*") → specific group → specific topic.
 // TS ref: resolveTelegramGroupConfig() in src/telegram/bot.ts + resolveTelegramGroupPromptSettings() in group-config-helpers.ts.
 type resolvedTopicConfig struct {
-	groupPolicy    string
-	requireMention *bool
-	mentionMode    string // "strict" (default) or "yield"
-	allowFrom      []string
-	enabled        *bool
-	skills         []string // nil = inherit, non-nil = override (empty = no skills)
-	tools          []string // nil = inherit (all tools), non-nil = override (supports "group:xxx")
-	systemPrompt   string   // concatenated group + topic prompts
+	groupPolicy                        string
+	requireMention                     *bool
+	mentionMode                        string // "strict" (default) or "yield"
+	replyToReactionMediaWithoutMention *bool
+	allowFrom                          []string
+	enabled                            *bool
+	skills                             []string // nil = inherit, non-nil = override (empty = no skills)
+	tools                              []string // nil = inherit (all tools), non-nil = override (supports "group:xxx")
+	systemPrompt                       string   // concatenated group + topic prompts
 }
 
 // resolveTopicConfig resolves the effective config for a chat/topic by merging layers.
@@ -26,10 +27,11 @@ type resolvedTopicConfig struct {
 // topicID is the forum topic thread ID (0 = not a forum topic).
 func resolveTopicConfig(cfg config.TelegramConfig, chatIDStr string, topicID int) resolvedTopicConfig {
 	result := resolvedTopicConfig{
-		groupPolicy:    cfg.GroupPolicy,
-		requireMention: cfg.RequireMention,
-		mentionMode:    cfg.MentionMode,
-		allowFrom:      cfg.AllowFrom,
+		groupPolicy:                        cfg.GroupPolicy,
+		requireMention:                     cfg.RequireMention,
+		mentionMode:                        cfg.MentionMode,
+		replyToReactionMediaWithoutMention: cfg.ReplyToReactionMediaWithoutMention,
+		allowFrom:                          cfg.AllowFrom,
 	}
 
 	if cfg.Groups == nil {
@@ -70,6 +72,9 @@ func mergeGroupInto(dst *resolvedTopicConfig, src *config.TelegramGroupConfig) {
 	if src.MentionMode != "" {
 		dst.mentionMode = src.MentionMode
 	}
+	if src.ReplyToReactionMediaWithoutMention != nil {
+		dst.replyToReactionMediaWithoutMention = src.ReplyToReactionMediaWithoutMention
+	}
 	if len(src.AllowFrom) > 0 {
 		dst.allowFrom = src.AllowFrom
 	}
@@ -98,6 +103,9 @@ func mergeTopicInto(dst *resolvedTopicConfig, src *config.TelegramTopicConfig, g
 	}
 	if src.MentionMode != "" {
 		dst.mentionMode = src.MentionMode
+	}
+	if src.ReplyToReactionMediaWithoutMention != nil {
+		dst.replyToReactionMediaWithoutMention = src.ReplyToReactionMediaWithoutMention
 	}
 	if len(src.AllowFrom) > 0 {
 		dst.allowFrom = src.AllowFrom
@@ -144,6 +152,15 @@ func (r *resolvedTopicConfig) effectiveMentionMode(defaultVal string) string {
 func (r *resolvedTopicConfig) effectiveRequireMention(defaultVal bool) bool {
 	if r.requireMention != nil {
 		return *r.requireMention
+	}
+	return defaultVal
+}
+
+// effectiveReplyToReactionMediaWithoutMention returns the resolved media-triggered
+// no-mention reply setting. Falls back to the provided default if not overridden.
+func (r *resolvedTopicConfig) effectiveReplyToReactionMediaWithoutMention(defaultVal bool) bool {
+	if r.replyToReactionMediaWithoutMention != nil {
+		return *r.replyToReactionMediaWithoutMention
 	}
 	return defaultVal
 }

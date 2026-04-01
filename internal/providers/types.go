@@ -14,6 +14,7 @@ const (
 	OptReasoningEffort = "reasoning_effort"
 	OptEnableThinking  = "enable_thinking"
 	OptThinkingBudget  = "thinking_budget"
+	OptToolChoice      = "tool_choice"
 )
 
 // TokenSource provides an OAuth access token (with auto-refresh).

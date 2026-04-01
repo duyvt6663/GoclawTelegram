@@ -359,7 +359,11 @@ func (p *OpenAIProvider) buildRequestBody(model string, req ChatRequest, stream 
 
 	if len(req.Tools) > 0 {
 		body["tools"] = CleanToolSchemas(p.name, req.Tools)
-		body["tool_choice"] = "auto"
+		toolChoice := "auto"
+		if v, ok := req.Options[OptToolChoice].(string); ok && strings.TrimSpace(v) != "" {
+			toolChoice = strings.TrimSpace(v)
+		}
+		body["tool_choice"] = toolChoice
 	}
 
 	if stream {

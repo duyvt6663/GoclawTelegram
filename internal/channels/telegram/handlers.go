@@ -314,6 +314,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	//   "yield": respond to all messages UNLESS another bot/user is @mentioned (and not us)
 	//            — enables "shared group" where all bots listen, but yield when someone is called by name
 	mentionMode := topicCfg.effectiveMentionMode(c.mentionMode)
+	implicitReactionMedia := false
 	if isGroup && (topicCfg.effectiveRequireMention(c.requireMention) || mentionMode == "yield") {
 		botUsername := c.bot.Username()
 
@@ -350,18 +351,28 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 			return
 		}
 
-		wasMentioned := c.detectMention(message, botUsername)
+		explicitlyMentioned := c.detectMention(message, botUsername)
+		wasMentioned := explicitlyMentioned
 
 		// Reply to bot's message counts as implicit mention
 		if !wasMentioned && msgCtx.ReplyInfo != nil && msgCtx.ReplyInfo.IsBotReply {
 			wasMentioned = true
 		}
 
+		otherMentioned := c.hasOtherMention(message, botUsername)
+		if !wasMentioned &&
+			!otherMentioned &&
+			topicCfg.effectiveReplyToReactionMediaWithoutMention(c.replyToReactionMediaWithoutMention) &&
+			shouldReplyToReactionMediaWithoutMention(message) {
+			wasMentioned = true
+			implicitReactionMedia = true
+		}
+
 		// Yield mode: skip only if another bot/user is explicitly mentioned (not us).
 		// If nobody is mentioned → respond. If we are mentioned → respond.
 		if mentionMode == "yield" && !wasMentioned {
 			// In yield mode, respond unless someone else was specifically called out
-			if !c.hasOtherMention(message, botUsername) {
+			if !otherMentioned {
 				wasMentioned = true // treat as mentioned — no specific target, all bots respond
 			}
 		}
@@ -371,6 +382,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 			"bot_username", botUsername,
 			"require_mention", c.requireMention,
 			"mention_mode", mentionMode,
+			"reaction_media_bypass", implicitReactionMedia,
 			"was_mentioned", wasMentioned,
 			"text_preview", channels.Truncate(content, 60),
 		)
@@ -645,8 +657,13 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		metadata["dm_thread_id"] = fmt.Sprintf("%d", dmThreadID)
 		metadata["message_thread_id"] = fmt.Sprintf("%d", dmThreadID)
 	}
-	if topicCfg.systemPrompt != "" {
-		metadata["topic_system_prompt"] = topicCfg.systemPrompt
+	effectiveSystemPrompt := topicCfg.systemPrompt
+	if implicitReactionMedia {
+		effectiveSystemPrompt = appendSystemPrompt(effectiveSystemPrompt, implicitReactionMediaSystemPrompt)
+		metadata["implicit_reaction_media"] = "true"
+	}
+	if effectiveSystemPrompt != "" {
+		metadata["topic_system_prompt"] = effectiveSystemPrompt
 	}
 	if topicCfg.skills != nil {
 		metadata["topic_skills"] = strings.Join(topicCfg.skills, ",")

@@ -117,7 +117,7 @@ func (t *FindAndPostLocalMemeTool) SetEmbeddingProvider(provider store.Embedding
 func (t *FindAndPostLocalMemeTool) Name() string { return localMemeToolName }
 
 func (t *FindAndPostLocalMemeTool) Description() string {
-	return "Pick an existing local meme GIF, video, or image from configured libraries using semantic search over local metadata and attach it to the current reply. Use this for reaction clips or meme punches from local files before falling back to web search."
+	return "Pick an existing local meme GIF, video, or image from configured libraries using semantic search over local metadata and attach it to the current reply. Query for the reaction or comeback you want to send back, not a literal description of the incoming meme. Use this for reaction clips or meme punches from local files before falling back to web search."
 }
 
 func (t *FindAndPostLocalMemeTool) Parameters() map[string]any {
@@ -126,7 +126,7 @@ func (t *FindAndPostLocalMemeTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"query": map[string]any{
 				"type":        "string",
-				"description": "Optional short reaction, joke beat, or vibe to match against configured local meme GIF, video, or image metadata. Keep it short, for example: 'caught in 4k', 'suspicious cat', 'victory lap'. Omit or use 'random' for a random local clip.",
+				"description": "Optional short reaction, joke beat, comeback, or vibe to match against configured local meme GIF, video, or image metadata. Describe the reply you want to send, not the incoming meme. Keep it short, for example: 'caught in 4k', 'not impressed', 'victory lap', 'bro please'. Omit or use 'random' for a random local clip.",
 			},
 			"library": map[string]any{
 				"type":        "string",
@@ -144,6 +144,9 @@ func (t *FindAndPostLocalMemeTool) Execute(ctx context.Context, args map[string]
 
 	query := strings.TrimSpace(GetParamString(args, "query", ""))
 	library := strings.TrimSpace(GetParamString(args, "library", ""))
+	if ReactionMediaModeFromCtx(ctx) {
+		query = normalizeReactionMediaQuery(query)
+	}
 
 	candidates, err := collectLocalMemeCandidates(ctx, t.embProvider, settings, library, query, ToolChannelFromCtx(ctx))
 	if err != nil {

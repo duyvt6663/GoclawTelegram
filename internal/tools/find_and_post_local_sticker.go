@@ -45,7 +45,7 @@ func (t *FindAndPostLocalStickerTool) Name() string { return stickers.LocalStick
 func (t *FindAndPostLocalStickerTool) RequiredChannelTypes() []string { return []string{"telegram"} }
 
 func (t *FindAndPostLocalStickerTool) Description() string {
-	return "Pick a previously captured Telegram sticker from configured libraries using semantic search over stored sticker metadata and attach it to the current reply. Prefer this for quick reaction stickers, callbacks, and recurring favorites in Telegram chats."
+	return "Pick a previously captured Telegram sticker from configured libraries using semantic search over stored sticker metadata and attach it to the current reply. Query for the reaction you want to send back, not a literal description of the incoming sticker. Prefer this for quick reaction stickers, callbacks, and recurring favorites in Telegram chats."
 }
 
 func (t *FindAndPostLocalStickerTool) Parameters() map[string]any {
@@ -54,7 +54,7 @@ func (t *FindAndPostLocalStickerTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"query": map[string]any{
 				"type":        "string",
-				"description": "Optional short reaction, mood, or callback to match against stored sticker metadata. Keep it short and expressive, for example: 'side eye', 'smug cat', 'applause', 'dead inside'. Omit or use 'random' for a random saved sticker.",
+				"description": "Optional short reaction, mood, callback, or comeback to match against stored sticker metadata. Describe the reply you want to send, not the incoming sticker. Keep it short and expressive, for example: 'side eye', 'not impressed', 'applause', 'dead inside', 'bro please'. Omit or use 'random' for a random saved sticker.",
 			},
 			"library": map[string]any{
 				"type":        "string",
@@ -72,6 +72,9 @@ func (t *FindAndPostLocalStickerTool) Execute(ctx context.Context, args map[stri
 
 	query := strings.TrimSpace(GetParamString(args, "query", ""))
 	library := strings.TrimSpace(GetParamString(args, "library", ""))
+	if ReactionMediaModeFromCtx(ctx) {
+		query = normalizeReactionMediaQuery(query)
+	}
 
 	candidates, err := collectLocalStickerCandidates(ctx, t.embProvider, settings, library, query)
 	if err != nil {

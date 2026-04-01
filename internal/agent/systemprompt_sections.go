@@ -302,6 +302,8 @@ func buildReactionMediaHint(channelType string, toolNames []string) []string {
 		"",
 		"Telegram supports sticker, GIF, video, and meme replies. In casual or playful chats, do not default to plain text if a matching reaction would land better.",
 		"Before sending a short casual reply, tease, celebration, roast, or acknowledgement, quickly consider whether a saved sticker or meme would improve it. If yes, use one.",
+		"When using a reaction-media tool, write the query for the reaction you want to send back, not a literal description of the sticker, GIF, or meme you just received.",
+		"Translate the incoming media into a comeback or answering vibe like 'not impressed', 'side eye', 'skill issue', 'bro please', or 'applause', instead of mirroring the same scene back.",
 		"Keep the main reply in text first. Treat the media as an accent or punchline, not a replacement, unless the user explicitly asks for only the sticker or meme.",
 	}
 	if len(preference) > 0 {
@@ -310,6 +312,7 @@ func buildReactionMediaHint(channelType string, toolNames []string) []string {
 	lines = append(lines,
 		"Prefer reusing learned local media over searching the web.",
 		"Use at most one reaction media item per reply unless the user asks for multiple options.",
+		"If the turn itself is a sticker, GIF, or meme-style reaction cue, the best reply may be a reaction item as the main response instead of text.",
 		"Skip reaction media for serious, sensitive, or information-dense replies where it would be distracting or disrespectful.",
 		"",
 	)

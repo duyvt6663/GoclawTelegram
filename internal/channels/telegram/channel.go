@@ -24,33 +24,34 @@ import (
 // Channel connects to Telegram via the Bot API using long polling.
 type Channel struct {
 	*channels.BaseChannel
-	bot              *telego.Bot
-	config           config.TelegramConfig
-	httpClient       *http.Client
-	transport        *http.Transport
-	ipv4Once         sync.Once // guards enableIPv4Only to prevent data race
-	pairingService   store.PairingStore
-	agentStore       store.AgentStore            // for agent key lookup (nil if not configured)
-	configPermStore  store.ConfigPermissionStore // for group file writer management (nil if not configured)
-	teamStore         store.TeamStore             // for /tasks, /task_detail commands (nil if not configured)
-	subagentTaskStore store.SubagentTaskStore     // for /subagents, /subagent commands (nil if not configured)
-	placeholders      sync.Map                   // localKey string → messageID int
-	stopThinking     sync.Map                    // localKey string → *thinkingCancel
-	typingCtrls      sync.Map                    // localKey string → *typing.Controller
-	reactions        sync.Map                    // localKey string → *StatusReactionController
-	pairingReplySent sync.Map                    // userID string → time.Time (debounce pairing replies)
-	threadIDs        sync.Map                    // localKey string → messageThreadID int (for forum topic routing)
-	approvedGroups   sync.Map                    // chatIDStr string → true (cached group pairing approval)
-	groupHistory     *channels.PendingHistory
-	stickerCapture   *stickers.CaptureService
-	historyLimit     int
-	requireMention   bool
-	mentionMode      string             // "strict" (default) or "yield"
-	pollCancel       context.CancelFunc // cancels the long polling context
-	pollDone         chan struct{}      // closed when polling goroutine exits
-	handlerWg        sync.WaitGroup     // tracks in-flight handler goroutines for graceful shutdown
-	handlerSem       chan struct{}      // bounded semaphore for concurrent handler goroutines
-	pendingDraftID   sync.Map           // localKey string → int (draftID)
+	bot                                *telego.Bot
+	config                             config.TelegramConfig
+	httpClient                         *http.Client
+	transport                          *http.Transport
+	ipv4Once                           sync.Once // guards enableIPv4Only to prevent data race
+	pairingService                     store.PairingStore
+	agentStore                         store.AgentStore            // for agent key lookup (nil if not configured)
+	configPermStore                    store.ConfigPermissionStore // for group file writer management (nil if not configured)
+	teamStore                          store.TeamStore             // for /tasks, /task_detail commands (nil if not configured)
+	subagentTaskStore                  store.SubagentTaskStore     // for /subagents, /subagent commands (nil if not configured)
+	placeholders                       sync.Map                    // localKey string → messageID int
+	stopThinking                       sync.Map                    // localKey string → *thinkingCancel
+	typingCtrls                        sync.Map                    // localKey string → *typing.Controller
+	reactions                          sync.Map                    // localKey string → *StatusReactionController
+	pairingReplySent                   sync.Map                    // userID string → time.Time (debounce pairing replies)
+	threadIDs                          sync.Map                    // localKey string → messageThreadID int (for forum topic routing)
+	approvedGroups                     sync.Map                    // chatIDStr string → true (cached group pairing approval)
+	groupHistory                       *channels.PendingHistory
+	stickerCapture                     *stickers.CaptureService
+	historyLimit                       int
+	requireMention                     bool
+	mentionMode                        string // "strict" (default) or "yield"
+	replyToReactionMediaWithoutMention bool
+	pollCancel                         context.CancelFunc // cancels the long polling context
+	pollDone                           chan struct{}      // closed when polling goroutine exits
+	handlerWg                          sync.WaitGroup     // tracks in-flight handler goroutines for graceful shutdown
+	handlerSem                         chan struct{}      // bounded semaphore for concurrent handler goroutines
+	pendingDraftID                     sync.Map           // localKey string → int (draftID)
 }
 
 type thinkingCancel struct {
@@ -129,21 +130,22 @@ func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.Pai
 	}
 
 	return &Channel{
-		BaseChannel:     base,
-		bot:             bot,
-		config:          cfg,
-		httpClient:      httpClient,
-		transport:       transport,
-		pairingService:  pairingSvc,
-		agentStore:      agentStore,
-		configPermStore:   configPermStore,
-		teamStore:         teamStore,
-		subagentTaskStore: subagentTaskStore,
-		groupHistory:      channels.MakeHistory(channels.TypeTelegram, pendingStore, base.TenantID()),
-		stickerCapture:  stickerCapture,
-		historyLimit:    historyLimit,
-		requireMention:  requireMention,
-		mentionMode:     mentionMode,
+		BaseChannel:                        base,
+		bot:                                bot,
+		config:                             cfg,
+		httpClient:                         httpClient,
+		transport:                          transport,
+		pairingService:                     pairingSvc,
+		agentStore:                         agentStore,
+		configPermStore:                    configPermStore,
+		teamStore:                          teamStore,
+		subagentTaskStore:                  subagentTaskStore,
+		groupHistory:                       channels.MakeHistory(channels.TypeTelegram, pendingStore, base.TenantID()),
+		stickerCapture:                     stickerCapture,
+		historyLimit:                       historyLimit,
+		requireMention:                     requireMention,
+		mentionMode:                        mentionMode,
+		replyToReactionMediaWithoutMention: cfg.ReplyToReactionMediaWithoutMention != nil && *cfg.ReplyToReactionMediaWithoutMention,
 	}, nil
 }
 

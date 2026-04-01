@@ -435,6 +435,8 @@ type RunRequest struct {
 	SkillFilter       []string           // per-request skill override: nil=use agent default, []=no skills, ["x","y"]=whitelist
 	HistoryLimit      int                // max user turns to keep in context (0=unlimited, from channel config)
 	ToolAllow         []string           // per-group tool allow list (nil = no restriction, supports "group:xxx")
+	ToolChoice        string             // optional provider tool choice hint (e.g. "required")
+	ReactionMediaMode bool               // true when the turn is an implicit sticker/GIF/meme reaction cue
 	LocalKey          string             // composite key with topic/thread suffix for routing (e.g. "-100123:topic:42")
 	ParentTraceID     uuid.UUID          // if set, reuse parent trace instead of creating new (announce runs)
 	ParentRootSpanID  uuid.UUID          // if set, nest announce agent span under this parent span

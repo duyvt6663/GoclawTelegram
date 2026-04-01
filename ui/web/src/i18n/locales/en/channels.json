@@ -185,6 +185,7 @@
     "group_policy": { "label": "Group Policy" },
     "require_mention": { "label": "Require @mention in groups", "disabledHint": "Multi-bot mode always listens to all messages" },
     "mention_mode": { "label": "Group Response Behavior", "help": "How the bot decides when to respond in groups with multiple bots." },
+    "reply_to_reaction_media_without_mention": { "label": "Reply To Reaction Media Without @mention", "help": "Let stickers, GIFs, meme images, and short reaction clips trigger a brief reply in groups even without @mention. Ordinary media should stay silent." },
     "history_limit": { "label": "Group History Limit", "help": "Max pending group messages for context (0 = disabled)" },
     "dm_stream": { "label": "DM Streaming", "help": "Stream response progressively in DMs" },
     "group_stream": { "label": "Group Streaming", "help": "Stream response progressively in groups" },

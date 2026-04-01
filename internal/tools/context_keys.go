@@ -20,17 +20,18 @@ import (
 type toolContextKey string
 
 const (
-	ctxChannel     toolContextKey = "tool_channel"
-	ctxChannelType toolContextKey = "tool_channel_type"
-	ctxChatID      toolContextKey = "tool_chat_id"
-	ctxPeerKind    toolContextKey = "tool_peer_kind"
-	ctxLocalKey    toolContextKey = "tool_local_key" // composite key with topic/thread suffix for routing
-	ctxSandboxKey  toolContextKey = "tool_sandbox_key"
-	ctxAsyncCB     toolContextKey = "tool_async_cb"
-	ctxWorkspace   toolContextKey = "tool_workspace"
-	ctxAgentKey    toolContextKey = "tool_agent_key"
-	ctxSessionKey  toolContextKey = "tool_session_key" // origin session key for announce routing
-	ctxRunKind     toolContextKey = "tool_run_kind"    // "notification", "announce", "delegation"
+	ctxChannel           toolContextKey = "tool_channel"
+	ctxChannelType       toolContextKey = "tool_channel_type"
+	ctxChatID            toolContextKey = "tool_chat_id"
+	ctxPeerKind          toolContextKey = "tool_peer_kind"
+	ctxReactionMediaMode toolContextKey = "tool_reaction_media_mode"
+	ctxLocalKey          toolContextKey = "tool_local_key" // composite key with topic/thread suffix for routing
+	ctxSandboxKey        toolContextKey = "tool_sandbox_key"
+	ctxAsyncCB           toolContextKey = "tool_async_cb"
+	ctxWorkspace         toolContextKey = "tool_workspace"
+	ctxAgentKey          toolContextKey = "tool_agent_key"
+	ctxSessionKey        toolContextKey = "tool_session_key" // origin session key for announce routing
+	ctxRunKind           toolContextKey = "tool_run_kind"    // "notification", "announce", "delegation"
 )
 
 // Well-known channel names used for routing and access control.
@@ -84,6 +85,15 @@ func WithToolPeerKind(ctx context.Context, peerKind string) context.Context {
 
 func ToolPeerKindFromCtx(ctx context.Context) string {
 	v, _ := ctx.Value(ctxPeerKind).(string)
+	return v
+}
+
+func WithReactionMediaMode(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, ctxReactionMediaMode, enabled)
+}
+
+func ReactionMediaModeFromCtx(ctx context.Context) bool {
+	v, _ := ctx.Value(ctxReactionMediaMode).(bool)
 	return v
 }
 

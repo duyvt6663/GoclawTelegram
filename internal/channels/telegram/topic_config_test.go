@@ -7,12 +7,12 @@ import (
 )
 
 //go:fix inline
-func boolPtr(b bool) *bool { return new(b) }
+func boolPtr(b bool) *bool { return &b }
 
 func TestResolveTopicConfig_Defaults(t *testing.T) {
 	cfg := config.TelegramConfig{
 		GroupPolicy:    "open",
-		RequireMention: new(true),
+		RequireMention: boolPtr(true),
 		AllowFrom:      []string{"user1"},
 	}
 
@@ -38,7 +38,7 @@ func TestResolveTopicConfig_WildcardGroup(t *testing.T) {
 		Groups: map[string]*config.TelegramGroupConfig{
 			"*": {
 				GroupPolicy:    "allowlist",
-				RequireMention: new(false),
+				RequireMention: boolPtr(false),
 				AllowFrom:      []string{"admin1"},
 			},
 		},
@@ -63,7 +63,7 @@ func TestResolveTopicConfig_SpecificGroupOverridesWildcard(t *testing.T) {
 		Groups: map[string]*config.TelegramGroupConfig{
 			"*": {
 				GroupPolicy:    "allowlist",
-				RequireMention: new(false),
+				RequireMention: boolPtr(false),
 				AllowFrom:      []string{"admin1"},
 				SystemPrompt:   "wildcard prompt",
 			},
@@ -97,14 +97,16 @@ func TestResolveTopicConfig_TopicOverridesGroup(t *testing.T) {
 		GroupPolicy: "open",
 		Groups: map[string]*config.TelegramGroupConfig{
 			"-100123": {
-				RequireMention: new(true),
-				SystemPrompt:   "group prompt",
-				Skills:         []string{"skill_a", "skill_b"},
+				RequireMention:                     boolPtr(true),
+				ReplyToReactionMediaWithoutMention: boolPtr(false),
+				SystemPrompt:                       "group prompt",
+				Skills:                             []string{"skill_a", "skill_b"},
 				Topics: map[string]*config.TelegramTopicConfig{
 					"42": {
-						RequireMention: new(false),
-						Skills:         []string{"skill_c"},
-						SystemPrompt:   "topic prompt",
+						RequireMention:                     boolPtr(false),
+						ReplyToReactionMediaWithoutMention: boolPtr(true),
+						Skills:                             []string{"skill_c"},
+						SystemPrompt:                       "topic prompt",
 					},
 				},
 			},
@@ -115,6 +117,9 @@ func TestResolveTopicConfig_TopicOverridesGroup(t *testing.T) {
 
 	if result.requireMention == nil || *result.requireMention != false {
 		t.Errorf("requireMention = %v, want false (topic override)", result.requireMention)
+	}
+	if result.replyToReactionMediaWithoutMention == nil || *result.replyToReactionMediaWithoutMention != true {
+		t.Errorf("replyToReactionMediaWithoutMention = %v, want true (topic override)", result.replyToReactionMediaWithoutMention)
 	}
 	if len(result.skills) != 1 || result.skills[0] != "skill_c" {
 		t.Errorf("skills = %v, want [skill_c]", result.skills)
@@ -172,10 +177,10 @@ func TestResolveTopicConfig_DisabledTopic(t *testing.T) {
 	cfg := config.TelegramConfig{
 		Groups: map[string]*config.TelegramGroupConfig{
 			"-100123": {
-				Enabled: new(true),
+				Enabled: boolPtr(true),
 				Topics: map[string]*config.TelegramTopicConfig{
 					"42": {
-						Enabled: new(false),
+						Enabled: boolPtr(false),
 					},
 				},
 			},
@@ -231,9 +236,24 @@ func TestEffectiveRequireMention(t *testing.T) {
 	}
 
 	// explicit requireMention overrides default
-	r2 := resolvedTopicConfig{requireMention: new(false)}
+	r2 := resolvedTopicConfig{requireMention: boolPtr(false)}
 	if r2.effectiveRequireMention(true) != false {
 		t.Error("effectiveRequireMention(true) with override=false should be false")
+	}
+}
+
+func TestEffectiveReplyToReactionMediaWithoutMention(t *testing.T) {
+	r := resolvedTopicConfig{}
+	if r.effectiveReplyToReactionMediaWithoutMention(false) != false {
+		t.Error("effectiveReplyToReactionMediaWithoutMention(false) = true, want false")
+	}
+	if r.effectiveReplyToReactionMediaWithoutMention(true) != true {
+		t.Error("effectiveReplyToReactionMediaWithoutMention(true) = false, want true")
+	}
+
+	r2 := resolvedTopicConfig{replyToReactionMediaWithoutMention: boolPtr(true)}
+	if r2.effectiveReplyToReactionMediaWithoutMention(false) != true {
+		t.Error("effectiveReplyToReactionMediaWithoutMention(false) with override=true should be true")
 	}
 }
 

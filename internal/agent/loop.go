@@ -262,6 +262,9 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (result *RunResult, 
 		if tid := store.TenantIDFromContext(ctx); tid != uuid.Nil {
 			chatReq.Options[providers.OptTenantID] = tid.String()
 		}
+		if toolChoice := resolveToolChoiceForIteration(req.ToolChoice, rs.iteration); toolChoice != "" {
+			chatReq.Options[providers.OptToolChoice] = toolChoice
+		}
 		reasoningDecision := providers.ResolveReasoningDecision(
 			provider,
 			model,

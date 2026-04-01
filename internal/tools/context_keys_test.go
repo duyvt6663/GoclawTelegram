@@ -37,6 +37,18 @@ func TestToolContextKeys_PeerKind(t *testing.T) {
 	}
 }
 
+func TestToolContextKeys_ReactionMediaMode(t *testing.T) {
+	ctx := context.Background()
+	if got := ReactionMediaModeFromCtx(ctx); got {
+		t.Fatal("expected reaction media mode to be false by default")
+	}
+
+	ctx = WithReactionMediaMode(ctx, true)
+	if got := ReactionMediaModeFromCtx(ctx); !got {
+		t.Fatal("expected reaction media mode to be true")
+	}
+}
+
 func TestToolContextKeys_SandboxKey(t *testing.T) {
 	ctx := context.Background()
 	ctx = WithToolSandboxKey(ctx, "agent:main:telegram:direct:123")

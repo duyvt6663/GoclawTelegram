@@ -61,6 +61,9 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	if req.ChannelType != "" {
 		ctx = tools.WithToolChannelType(ctx, req.ChannelType)
 	}
+	if req.ReactionMediaMode {
+		ctx = tools.WithReactionMediaMode(ctx, true)
+	}
 	// Inject per-agent overrides from DB so tools honor per-agent settings.
 	if l.restrictToWs != nil {
 		ctx = tools.WithRestrictToWorkspace(ctx, *l.restrictToWs)

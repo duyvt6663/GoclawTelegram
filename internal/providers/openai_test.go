@@ -77,3 +77,27 @@ func TestOpenAIProviderBuildRequestBodyGPT53ChatNormalizesReasoningEffort(t *tes
 		}
 	}
 }
+
+func TestOpenAIProviderBuildRequestBodyHonorsToolChoiceOverride(t *testing.T) {
+	p := NewOpenAIProvider("openai", "test-key", "https://api.openai.com/v1", "gpt-4o")
+
+	req := ChatRequest{
+		Messages: []Message{{Role: "user", Content: "React with a sticker"}},
+		Tools: []ToolDefinition{{
+			Type: "function",
+			Function: ToolFunctionSchema{
+				Name:        "find_and_post_local_sticker",
+				Description: "Attach a saved sticker",
+				Parameters:  map[string]any{"type": "object"},
+			},
+		}},
+		Options: map[string]any{
+			OptToolChoice: "required",
+		},
+	}
+
+	body := p.buildRequestBody("gpt-4o", req, false)
+	if got := body["tool_choice"]; got != "required" {
+		t.Fatalf("tool_choice = %v, want required", got)
+	}
+}

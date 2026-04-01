@@ -90,7 +90,7 @@ func NewFindAndPostMemeTool(search *WebSearchTool, fetch *WebFetchTool) *FindAnd
 func (t *FindAndPostMemeTool) Name() string { return "find_and_post_meme" }
 
 func (t *FindAndPostMemeTool) Description() string {
-	return "Find an online meme or reaction image on the web, download it to the workspace, and attach it to your next reply. Use this only when local saved stickers or local meme files are not a good fit."
+	return "Find an online meme or reaction image on the web, download it to the workspace, and attach it to your next reply. Query for the reaction you want to send back, not a literal description of the incoming meme. Use this only when local saved stickers or local meme files are not a good fit."
 }
 
 func (t *FindAndPostMemeTool) Parameters() map[string]any {
@@ -99,7 +99,7 @@ func (t *FindAndPostMemeTool) Parameters() map[string]any {
 		"properties": map[string]any{
 			"query": map[string]any{
 				"type":        "string",
-				"description": "Short topic, joke, or reaction to search for as an online meme image. Prefer 1-3 broad keywords instead of full sentences. Example: 'surprised cat', 'deployment', 'facepalm reaction'. Use this after local reaction media options have been considered.",
+				"description": "Short reaction, comeback, or joke beat to search for as an online meme image. Query for the reply you want to send, not a literal description of the incoming meme. Prefer 1-3 broad keywords instead of full sentences. Example: 'facepalm reaction', 'not impressed', 'caught in 4k'. Use this after local reaction media options have been considered.",
 			},
 			"filename_hint": map[string]any{
 				"type":        "string",
@@ -114,6 +114,9 @@ func (t *FindAndPostMemeTool) Execute(ctx context.Context, args map[string]any) 
 	query := strings.TrimSpace(GetParamString(args, "query", ""))
 	if query == "" {
 		return ErrorResult("query is required")
+	}
+	if ReactionMediaModeFromCtx(ctx) {
+		query = normalizeReactionMediaQuery(query)
 	}
 	if t.search == nil || len(t.search.providers) == 0 {
 		return ErrorResult("meme search is unavailable because no web search providers are configured")
