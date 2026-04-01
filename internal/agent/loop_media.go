@@ -72,8 +72,12 @@ func mimeFromExt(ext string) string {
 		return "image/gif"
 	case ".webp":
 		return "image/webp"
+	case ".webm":
+		return "video/webm"
 	case ".mp4":
 		return "video/mp4"
+	case ".tgs":
+		return "application/x-tgsticker"
 	case ".ogg", ".opus":
 		return "audio/ogg"
 	case ".mp3":

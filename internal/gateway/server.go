@@ -49,21 +49,22 @@ type Server struct {
 	// Non-handler dependencies (don't implement RegisterRoutes)
 	policyEngine   *permissions.PolicyEngine
 	pairingService store.PairingStore
-	apiKeyStore    store.APIKeyStore  // for API key auth lookup
-	agentStore     store.AgentStore   // for context injection in tools_invoke
-	msgBus         *bus.MessageBus    // for MCP bridge media delivery
+	apiKeyStore    store.APIKeyStore // for API key auth lookup
+	agentStore     store.AgentStore  // for context injection in tools_invoke
+	builtinTools   store.BuiltinToolStore
+	msgBus         *bus.MessageBus // for MCP bridge media delivery
 
 	upgrader    websocket.Upgrader
 	rateLimiter *RateLimiter
 	clients     map[string]*Client
 	mu          sync.RWMutex
 
-	startedAt      time.Time
-	version        string
-	db             interface{ PingContext(context.Context) error } // for health check DB ping
-	updateChecker  *UpdateChecker
+	startedAt     time.Time
+	version       string
+	db            interface{ PingContext(context.Context) error } // for health check DB ping
+	updateChecker *UpdateChecker
 
-	logTee   *LogTee                  // optional; auto-unsubscribes clients on disconnect
+	logTee   *LogTee                 // optional; auto-unsubscribes clients on disconnect
 	postTurn tools.PostTurnProcessor // optional; for team task dispatch in HTTP API paths
 
 	httpServer *http.Server
@@ -73,6 +74,11 @@ type Server struct {
 // SetPostTurnProcessor sets the post-turn processor for team task dispatch in HTTP API handlers.
 func (s *Server) SetPostTurnProcessor(pt tools.PostTurnProcessor) {
 	s.postTurn = pt
+}
+
+// SetBuiltinToolStore sets the builtin tool store for direct tool invocation.
+func (s *Server) SetBuiltinToolStore(bts store.BuiltinToolStore) {
+	s.builtinTools = bts
 }
 
 // NewServer creates a new gateway server.
@@ -165,7 +171,7 @@ func (s *Server) BuildMux() *http.ServeMux {
 
 	// Direct tool invocation
 	if s.tools != nil {
-		toolsHandler := httpapi.NewToolsInvokeHandler(s.tools, s.agentStore)
+		toolsHandler := httpapi.NewToolsInvokeHandler(s.tools, s.agentStore, s.builtinTools)
 		mux.Handle("/v1/tools/invoke", toolsHandler)
 	}
 
@@ -607,7 +613,7 @@ func StartTestServer(s *Server, ctx context.Context) (addr string, start func())
 	mux.Handle("/v1/responses", responsesHandler)
 
 	if s.tools != nil {
-		toolsHandler := httpapi.NewToolsInvokeHandler(s.tools, s.agentStore)
+		toolsHandler := httpapi.NewToolsInvokeHandler(s.tools, s.agentStore, s.builtinTools)
 		mux.Handle("/v1/tools/invoke", toolsHandler)
 	}
 

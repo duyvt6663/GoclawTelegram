@@ -51,7 +51,10 @@ func seedOnboardPlaceholders(dsn string) error {
 		return nil
 	}
 
-	ctx := context.Background()
+	// Onboarding runs before any end-user tenant context exists. Seed the
+	// placeholder providers into the master tenant so the UI can surface them
+	// without tripping tenant-scoped store checks.
+	ctx := store.WithTenantID(context.Background(), store.MasterTenantID)
 
 	// Build a set of existing api_base values to avoid overwriting user-configured entries.
 	existing, err := stores.Providers.ListProviders(ctx)

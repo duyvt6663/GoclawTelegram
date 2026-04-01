@@ -370,23 +370,22 @@ func (p *OpenAIProvider) buildRequestBody(model string, req ChatRequest, stream 
 
 	// Merge options
 	if v, ok := req.Options[OptMaxTokens]; ok {
-		if strings.HasPrefix(model, "gpt-5") || strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "o4") {
+		if openAIUsesMaxCompletionTokens(model) {
 			body["max_completion_tokens"] = v
 		} else {
 			body["max_tokens"] = v
 		}
 	}
 	if v, ok := req.Options[OptTemperature]; ok {
-		// GPT-5 mini/nano and o-series models only support default temperature
-		skipTemp := strings.HasPrefix(model, "gpt-5-mini") || strings.HasPrefix(model, "gpt-5-nano") || strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "o4")
-		if !skipTemp {
+		// GPT-5 class and o-series models reject custom temperature values.
+		if !openAIRejectsCustomTemperature(model) {
 			body["temperature"] = v
 		}
 	}
 
-	// Inject reasoning_effort for o-series models (ignored by models that don't support it)
+	// Inject reasoning_effort for models that support/expect OpenAI-style reasoning controls.
 	if level, ok := req.Options[OptThinkingLevel].(string); ok && level != "" && level != "off" {
-		body[OptReasoningEffort] = level
+		body[OptReasoningEffort] = normalizeOpenAIReasoningEffort(model, level)
 	}
 
 	// DashScope-specific passthrough keys
@@ -398,6 +397,37 @@ func (p *OpenAIProvider) buildRequestBody(model string, req ChatRequest, stream 
 	}
 
 	return body
+}
+
+func openAIUsesMaxCompletionTokens(model string) bool {
+	base := openAIBaseModel(model)
+	return strings.HasPrefix(base, "gpt-5") ||
+		strings.HasPrefix(base, "o1") ||
+		strings.HasPrefix(base, "o3") ||
+		strings.HasPrefix(base, "o4")
+}
+
+func openAIRejectsCustomTemperature(model string) bool {
+	return openAIUsesMaxCompletionTokens(model)
+}
+
+func normalizeOpenAIReasoningEffort(model, level string) string {
+	base := openAIBaseModel(model)
+
+	// GPT-5.3 chat models currently reject "low" and require at least "medium".
+	if strings.HasPrefix(base, "gpt-5.3-chat") && level == "low" {
+		return "medium"
+	}
+
+	return level
+}
+
+func openAIBaseModel(model string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if idx := strings.LastIndex(model, "/"); idx >= 0 {
+		model = model[idx+1:]
+	}
+	return model
 }
 
 func (p *OpenAIProvider) doRequest(ctx context.Context, body any) (io.ReadCloser, error) {

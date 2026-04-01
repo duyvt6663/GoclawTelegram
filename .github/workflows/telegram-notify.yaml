@@ -1,0 +1,117 @@
+name: Telegram Notifications
+
+# Required repository secrets:
+# - TELEGRAM_BOT_TOKEN
+# - TELEGRAM_CHAT_ID
+
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: Optional custom message for a manual Telegram test
+        required: false
+        type: string
+  issue_comment:
+    types: [created]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build Telegram message
+        id: build
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_PATH: ${{ github.event_path }}
+          REPOSITORY: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          SERVER_URL: ${{ github.server_url }}
+          RUN_ID: ${{ github.run_id }}
+          MANUAL_MESSAGE: ${{ inputs.message }}
+        run: |
+          set -euo pipefail
+
+          message_file="${RUNNER_TEMP}/telegram-message.txt"
+          echo "notify=false" >> "${GITHUB_OUTPUT}"
+
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if [[ -n "${MANUAL_MESSAGE}" ]]; then
+              printf '%s\n' "${MANUAL_MESSAGE}" > "${message_file}"
+            else
+              printf 'Manual Telegram test from %s\nRun: %s/%s/actions/runs/%s\n' \
+                "${REPOSITORY}" "${SERVER_URL}" "${REPOSITORY}" "${RUN_ID}" > "${message_file}"
+            fi
+          elif [[ "${EVENT_NAME}" == "issue_comment" ]]; then
+            subject="Issue"
+            if jq -e '.issue.pull_request != null' "${EVENT_PATH}" >/dev/null; then
+              subject="Pull request"
+            fi
+
+            issue_number="$(jq -r '.issue.number' "${EVENT_PATH}")"
+            issue_title="$(jq -r '.issue.title // ""' "${EVENT_PATH}")"
+            comment_url="$(jq -r '.comment.html_url // ""' "${EVENT_PATH}")"
+            comment_body="$(jq -r '.comment.body // ""' "${EVENT_PATH}" | tr '\n' ' ' | cut -c1-400)"
+
+            {
+              printf 'New GitHub comment in %s\n' "${REPOSITORY}"
+              printf '%s #%s: %s\n' "${subject}" "${issue_number}" "${issue_title}"
+              printf 'By: %s\n' "${ACTOR}"
+              if [[ -n "${comment_body}" ]]; then
+                printf 'Comment: %s\n' "${comment_body}"
+              fi
+              printf 'Link: %s\n' "${comment_url}"
+            } > "${message_file}"
+          elif [[ "${EVENT_NAME}" == "workflow_run" ]]; then
+            conclusion="$(jq -r '.workflow_run.conclusion // ""' "${EVENT_PATH}")"
+            if [[ "${conclusion}" == "success" ]]; then
+              exit 0
+            fi
+
+            workflow_name="$(jq -r '.workflow_run.name // "CI"' "${EVENT_PATH}")"
+            branch="$(jq -r '.workflow_run.head_branch // ""' "${EVENT_PATH}")"
+            run_url="$(jq -r '.workflow_run.html_url // ""' "${EVENT_PATH}")"
+
+            {
+              printf 'GitHub workflow alert in %s\n' "${REPOSITORY}"
+              printf 'Workflow: %s\n' "${workflow_name}"
+              if [[ -n "${branch}" ]]; then
+                printf 'Branch: %s\n' "${branch}"
+              fi
+              printf 'Conclusion: %s\n' "${conclusion}"
+              printf 'Link: %s\n' "${run_url}"
+            } > "${message_file}"
+          else
+            exit 0
+          fi
+
+          echo "notify=true" >> "${GITHUB_OUTPUT}"
+          echo "message_file=${message_file}" >> "${GITHUB_OUTPUT}"
+
+      - name: Send Telegram message
+        if: steps.build.outputs.notify == 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MESSAGE_FILE: ${{ steps.build.outputs.message_file }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${TELEGRAM_BOT_TOKEN}" ]]; then
+            echo "Missing TELEGRAM_BOT_TOKEN secret" >&2
+            exit 1
+          fi
+
+          if [[ -z "${TELEGRAM_CHAT_ID}" ]]; then
+            echo "Missing TELEGRAM_CHAT_ID secret" >&2
+            exit 1
+          fi
+
+          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text@${MESSAGE_FILE}"

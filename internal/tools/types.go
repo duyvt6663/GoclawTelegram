@@ -67,6 +67,11 @@ type MemoryStoreAware interface {
 	SetMemoryStore(store.MemoryStore)
 }
 
+// EmbeddingProviderAware tools can receive a text embedding provider.
+type EmbeddingProviderAware interface {
+	SetEmbeddingProvider(store.EmbeddingProvider)
+}
+
 // ApprovalAware tools can receive an ExecApprovalManager.
 type ApprovalAware interface {
 	SetApprovalManager(*ExecApprovalManager, string)

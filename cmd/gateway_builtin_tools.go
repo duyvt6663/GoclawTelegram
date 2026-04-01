@@ -32,6 +32,13 @@ func builtinToolSeedData() []store.BuiltinToolDef {
 		{Name: "web_fetch", DisplayName: "Web Fetch", Description: "Fetch a web page or API endpoint and extract its text content", Category: "web", Enabled: true,
 			Settings: json.RawMessage(`{"extractors":[{"name":"defuddle","enabled":true,"base_url":"https://fetch.goclaw.sh/","max_retries":2},{"name":"html-to-markdown","enabled":true}]}`),
 		},
+		{Name: "find_and_post_meme", DisplayName: "Find Online Meme Image", Description: "Search the web for an existing meme image, download it, and attach it to the current reply. Use this when saved stickers or local meme files are not a good fit.", Category: "web", Enabled: true},
+		{Name: "find_and_post_local_meme", DisplayName: "Post Local Meme GIF Or Video", Description: "Pick an existing local meme GIF, video, or image from configured libraries and attach it to the current reply. Prefer this for reaction clips before web search.", Category: "media", Enabled: true,
+			Settings: json.RawMessage(`{"libraries":[],"exclude_terms":["hitler"]}`),
+		},
+		{Name: "find_and_post_local_sticker", DisplayName: "Post Saved Sticker", Description: "Pick a previously learned Telegram sticker from configured local libraries using semantic search over saved metadata and attach it to the current reply. Prefer this for quick Telegram reactions and callbacks.", Category: "media", Enabled: true,
+			Settings: json.RawMessage(`{"libraries":[],"allowed_extensions":[".tgs",".webm",".webp"],"exclude_terms":[],"auto_capture":{"enabled":false}}`),
+		},
 
 		// memory
 		{Name: "memory_search", DisplayName: "Memory Search", Description: "Search through the agent's long-term memory using semantic similarity", Category: "memory", Enabled: true,

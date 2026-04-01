@@ -366,8 +366,11 @@ var toolStatusMap = map[string]string{
 	// Runtime
 	"exec": "⚡ Running code...",
 	// Web
-	"web_search": "🔍 Searching the web...",
-	"web_fetch":  "🔍 Fetching web content...",
+	"web_search":                  "🔍 Searching the web...",
+	"web_fetch":                   "🔍 Fetching web content...",
+	"find_and_post_meme":          "🖼 Finding an online meme image...",
+	"find_and_post_local_meme":    "🎬 Picking a local meme GIF/video...",
+	"find_and_post_local_sticker": "🧷 Picking a saved sticker...",
 	// Memory
 	"memory_search":          "🧠 Searching memory...",
 	"memory_get":             "🧠 Retrieving memory...",
@@ -384,8 +387,8 @@ var toolStatusMap = map[string]string{
 	// Browser
 	"browser": "🌐 Browsing...",
 	// Delegation & teams
-	"spawn":        "👥 Delegating task...",
-	"team_tasks":   "📋 Managing team tasks...",
+	"spawn":      "👥 Delegating task...",
+	"team_tasks": "📋 Managing team tasks...",
 	// Sessions
 	"sessions_list":    "📋 Listing sessions...",
 	"session_status":   "📋 Checking session...",

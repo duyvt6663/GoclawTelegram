@@ -27,6 +27,8 @@ func DetectMIMEType(fileName string) string {
 		return "audio/ogg"
 	case ".webp":
 		return "image/webp"
+	case ".tgs":
+		return "application/x-tgsticker"
 	case ".flac":
 		return "audio/flac"
 	case ".mkv":

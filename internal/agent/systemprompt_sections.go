@@ -274,6 +274,48 @@ func buildGroupChatReplyHint() []string {
 	}
 }
 
+func buildReactionMediaHint(channelType string, toolNames []string) []string {
+	if channelType != "telegram" {
+		return nil
+	}
+
+	hasSavedSticker := slices.Contains(toolNames, "find_and_post_local_sticker")
+	hasLocalMeme := slices.Contains(toolNames, "find_and_post_local_meme")
+	hasOnlineMeme := slices.Contains(toolNames, "find_and_post_meme")
+	if !hasSavedSticker && !hasLocalMeme && !hasOnlineMeme {
+		return nil
+	}
+
+	var preference []string
+	if hasSavedSticker {
+		preference = append(preference, "`find_and_post_local_sticker`")
+	}
+	if hasLocalMeme {
+		preference = append(preference, "`find_and_post_local_meme`")
+	}
+	if hasOnlineMeme {
+		preference = append(preference, "`find_and_post_meme`")
+	}
+
+	lines := []string{
+		"## Reaction Media",
+		"",
+		"Telegram supports sticker, GIF, video, and meme replies. In casual or playful chats, do not default to plain text if a matching reaction would land better.",
+		"Before sending a short casual reply, tease, celebration, roast, or acknowledgement, quickly consider whether a saved sticker or meme would improve it. If yes, use one.",
+		"Keep the main reply in text first. Treat the media as an accent or punchline, not a replacement, unless the user explicitly asks for only the sticker or meme.",
+	}
+	if len(preference) > 0 {
+		lines = append(lines, fmt.Sprintf("Prefer this order when it fits: %s.", strings.Join(preference, " -> ")))
+	}
+	lines = append(lines,
+		"Prefer reusing learned local media over searching the web.",
+		"Use at most one reaction media item per reply unless the user asks for multiple options.",
+		"Skip reaction media for serious, sensitive, or information-dense replies where it would be distracting or disrespectful.",
+		"",
+	)
+	return lines
+}
+
 // personaFileNames are the context files that define agent identity/behavior.
 // These are injected early in the system prompt (primacy zone) and reinforced
 // at the end (recency zone) to prevent persona drift in long conversations.

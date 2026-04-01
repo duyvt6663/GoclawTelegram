@@ -40,7 +40,7 @@ var errMediaTooLarge = errors.New("file exceeds max size")
 
 // MediaError records a media download failure with enough context for user/model feedback.
 type MediaError struct {
-	Type     string // "image", "video", "audio", "voice", "document", "animation"
+	Type     string // "image", "video", "audio", "voice", "document", "animation", "sticker"
 	Reason   string // human-readable reason
 	MaxBytes int64  // configured limit (0 if not a size error)
 }
@@ -54,14 +54,7 @@ func (c *Channel) resolveMedia(ctx context.Context, msg *telego.Message) ([]Medi
 	var results []MediaInfo
 	var mediaErrors []MediaError
 
-	maxBytes := c.config.MediaMaxBytes
-	if maxBytes == 0 {
-		if c.config.APIServer != "" {
-			maxBytes = localAPIDefaultMaxBytes
-		} else {
-			maxBytes = defaultMediaMaxBytes
-		}
-	}
+	maxBytes := c.mediaMaxBytes()
 
 	// Photo: take highest resolution (last element)
 	if msg.Photo != nil && len(msg.Photo) > 0 {
@@ -135,6 +128,28 @@ func (c *Channel) resolveMedia(ctx context.Context, msg *telego.Message) ([]Medi
 		}
 	}
 
+	// Sticker
+	if msg.Sticker != nil {
+		for _, target := range stickerMediaTargets(msg.Sticker) {
+			filePath, err := c.downloadMedia(ctx, target.FileID, maxBytes)
+			if err != nil {
+				slog.Warn("failed to download sticker media", "file_id", target.FileID, "type", target.Type, "error", err)
+				mediaErrors = append(mediaErrors, newMediaError("sticker", err, maxBytes))
+				continue
+			}
+			filePath = renameDownloadedSticker(filePath)
+			results = append(results, MediaInfo{
+				Type:        target.Type,
+				FilePath:    filePath,
+				FileID:      target.FileID,
+				ContentType: detectDownloadedMIME(filePath, target.ContentType),
+				FileName:    target.FileName,
+				FileSize:    target.FileSize,
+				Note:        target.Note,
+			})
+		}
+	}
+
 	// Audio
 	if msg.Audio != nil {
 		filePath, err := c.downloadMedia(ctx, msg.Audio.FileID, maxBytes)
@@ -189,6 +204,203 @@ func (c *Channel) resolveMedia(ctx context.Context, msg *telego.Message) ([]Medi
 	}
 
 	return results, mediaErrors
+}
+
+func (c *Channel) mediaMaxBytes() int64 {
+	maxBytes := c.config.MediaMaxBytes
+	if maxBytes == 0 {
+		if c.config.APIServer != "" {
+			maxBytes = localAPIDefaultMaxBytes
+		} else {
+			maxBytes = defaultMediaMaxBytes
+		}
+	}
+	return maxBytes
+}
+
+type stickerMediaTarget struct {
+	Type        string
+	FileID      string
+	FileSize    int64
+	ContentType string
+	FileName    string
+	Note        string
+}
+
+func stickerMediaTargets(sticker *telego.Sticker) []stickerMediaTarget {
+	if sticker == nil {
+		return nil
+	}
+
+	switch {
+	case sticker.IsVideo:
+		targets := make([]stickerMediaTarget, 0, 2)
+		if sticker.Thumbnail != nil {
+			targets = append(targets, stickerMediaTarget{
+				Type:        media.TypeImage,
+				FileID:      sticker.Thumbnail.FileID,
+				FileSize:    int64(sticker.Thumbnail.FileSize),
+				ContentType: "image/webp",
+				FileName:    "sticker-preview.webp",
+				Note:        buildStickerNote(sticker, true),
+			})
+		}
+		targets = append(targets, stickerMediaTarget{
+			Type:        media.TypeVideo,
+			FileID:      sticker.FileID,
+			FileSize:    int64(sticker.FileSize),
+			ContentType: "video/webm",
+			FileName:    "sticker.webm",
+			Note:        buildStickerNote(sticker, false),
+		})
+		return targets
+
+	case sticker.IsAnimated:
+		if sticker.Thumbnail != nil {
+			return []stickerMediaTarget{{
+				Type:        media.TypeImage,
+				FileID:      sticker.Thumbnail.FileID,
+				FileSize:    int64(sticker.Thumbnail.FileSize),
+				ContentType: "image/webp",
+				FileName:    "sticker-preview.webp",
+				Note:        buildStickerNote(sticker, true),
+			}}
+		}
+		return []stickerMediaTarget{{
+			Type:        media.TypeDocument,
+			FileID:      sticker.FileID,
+			FileSize:    int64(sticker.FileSize),
+			ContentType: "application/x-tgsticker",
+			FileName:    "sticker.tgs",
+			Note:        buildStickerNote(sticker, false),
+		}}
+
+	default:
+		return []stickerMediaTarget{{
+			Type:        media.TypeImage,
+			FileID:      sticker.FileID,
+			FileSize:    int64(sticker.FileSize),
+			ContentType: "image/webp",
+			FileName:    "sticker.webp",
+			Note:        buildStickerNote(sticker, false),
+		}}
+	}
+}
+
+func extractStickerMediaRefs(sticker *telego.Sticker) []channels.MediaRef {
+	targets := stickerMediaTargets(sticker)
+	if len(targets) == 0 {
+		return nil
+	}
+
+	refs := make([]channels.MediaRef, 0, len(targets))
+	for _, target := range targets {
+		refs = append(refs, channels.MediaRef{
+			Type:        target.Type,
+			FileID:      target.FileID,
+			FileSize:    target.FileSize,
+			ContentType: target.ContentType,
+			FileName:    target.FileName,
+			Note:        target.Note,
+		})
+	}
+	return refs
+}
+
+func buildStickerNote(sticker *telego.Sticker, preview bool) string {
+	if sticker == nil {
+		return "Telegram sticker."
+	}
+
+	label := "Telegram sticker"
+	inspectionHint := "Use read_image to inspect the visual content before describing what it shows."
+	switch {
+	case sticker.IsVideo:
+		if preview {
+			label = "Telegram video sticker preview"
+			inspectionHint = "This is a preview frame of a video sticker. Use the visible frame to identify the subject or scene, and avoid claiming detailed motion unless it is obvious."
+		} else {
+			label = "Telegram video sticker"
+			inspectionHint = "If a preview frame is available, use it to identify the subject. Use read_video to inspect the motion before describing what it shows."
+		}
+	case sticker.IsAnimated:
+		if preview {
+			label = "Telegram animated sticker preview"
+			inspectionHint = "This is only a preview frame of an animated sticker. Use read_image to inspect the frame and avoid claiming detailed motion unless it is obvious."
+		} else {
+			label = "Telegram animated sticker"
+			inspectionHint = "Use read_document only for the raw .tgs file if absolutely necessary, but prefer any available preview image for visual understanding."
+		}
+	}
+
+	var details []string
+	if sticker.Emoji != "" {
+		details = append(details, "emoji "+sticker.Emoji)
+	}
+	if sticker.SetName != "" {
+		details = append(details, "set "+sticker.SetName)
+	}
+	if sticker.Type == telego.StickerTypeCustomEmoji {
+		details = append(details, "custom emoji")
+	}
+
+	base := label
+	if len(details) > 0 {
+		base += " (" + strings.Join(details, ", ") + ")"
+	}
+	return base + ". Metadata like emoji/set name is not enough to identify the actual visual content. " + inspectionHint
+}
+
+func lightweightStickerTag(sticker *telego.Sticker) string {
+	if sticker == nil {
+		return ""
+	}
+
+	label := "sticker"
+	article := "a"
+	switch {
+	case sticker.IsVideo:
+		label = "video sticker"
+	case sticker.IsAnimated:
+		label = "animated sticker"
+		article = "an"
+	}
+
+	text := "[sent " + article + " " + label
+	if sticker.Emoji != "" {
+		text += " " + sticker.Emoji
+	}
+	if sticker.SetName != "" {
+		text += " from set " + sticker.SetName
+	}
+	return text + "]"
+}
+
+func detectDownloadedMIME(filePath, fallback string) string {
+	if filePath == "" {
+		return fallback
+	}
+	if ct := media.DetectMIMEType(filePath); ct != "" && ct != "application/octet-stream" {
+		return ct
+	}
+	return fallback
+}
+
+func renameDownloadedSticker(filePath string) string {
+	if filePath == "" {
+		return filePath
+	}
+
+	ext := filepath.Ext(filePath)
+	if ext == "" {
+		ext = ".bin"
+	}
+
+	renamed := filepath.Join(filepath.Dir(filePath), fmt.Sprintf("goclaw_sticker_%d%s", time.Now().UnixNano(), ext))
+	if err := os.Rename(filePath, renamed); err != nil {
+		return filePath
+	}
+	return renamed
 }
 
 // downloadMedia downloads a file from Telegram by file_id with retry logic.
@@ -379,6 +591,9 @@ func lightweightMediaTags(msg *telego.Message) string {
 	if msg.Animation != nil {
 		tags = append(tags, "[sent a video]")
 	}
+	if msg.Sticker != nil {
+		tags = append(tags, lightweightStickerTag(msg.Sticker))
+	}
 	if msg.Audio != nil {
 		tags = append(tags, "[sent audio]")
 	}
@@ -417,6 +632,7 @@ func extractMediaRefs(msg *telego.Message) []channels.MediaRef {
 	if msg.Animation != nil {
 		refs = append(refs, channels.MediaRef{Type: "animation", FileID: msg.Animation.FileID, FileSize: int64(msg.Animation.FileSize)})
 	}
+	refs = append(refs, extractStickerMediaRefs(msg.Sticker)...)
 	if msg.Audio != nil {
 		refs = append(refs, channels.MediaRef{Type: "audio", FileID: msg.Audio.FileID, FileSize: int64(msg.Audio.FileSize)})
 	}
@@ -489,9 +705,13 @@ func (c *Channel) resolveMediaRefs(ctx context.Context, refs []channels.MediaRef
 			continue
 		}
 		results = append(results, MediaInfo{
-			Type:     ref.Type,
-			FilePath: filePath,
-			FileID:   ref.FileID,
+			Type:        ref.Type,
+			FilePath:    filePath,
+			FileID:      ref.FileID,
+			ContentType: ref.ContentType,
+			FileName:    ref.FileName,
+			FileSize:    ref.FileSize,
+			Note:        ref.Note,
 		})
 	}
 	return results, errs
@@ -512,6 +732,10 @@ func lightweightTagForType(mediaType string, msg *telego.Message) string {
 	case "animation":
 		if msg.Animation != nil {
 			return "[sent a video]"
+		}
+	case "sticker":
+		if msg.Sticker != nil {
+			return lightweightStickerTag(msg.Sticker)
 		}
 	case "audio":
 		if msg.Audio != nil {

@@ -13,11 +13,11 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/sandbox"
-	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
@@ -131,6 +131,18 @@ func setupToolRegistry(
 	})
 	toolsReg.Register(webFetchTool)
 	slog.Info("web_fetch tool enabled", "policy", cfg.Tools.WebFetch.Policy, "blocked", len(cfg.Tools.WebFetch.BlockedDomains))
+	if memeTool := tools.NewFindAndPostMemeTool(webSearchTool, webFetchTool); memeTool != nil {
+		toolsReg.Register(memeTool)
+		slog.Info("find_and_post_meme tool enabled")
+	}
+	if localMemeTool := tools.NewFindAndPostLocalMemeTool(); localMemeTool != nil {
+		toolsReg.Register(localMemeTool)
+		slog.Info("find_and_post_local_meme tool enabled")
+	}
+	if localStickerTool := tools.NewFindAndPostLocalStickerTool(); localStickerTool != nil {
+		toolsReg.Register(localStickerTool)
+		slog.Info("find_and_post_local_sticker tool enabled")
+	}
 
 	// Vision fallback tool (for non-vision providers like MiniMax)
 	toolsReg.Register(tools.NewReadImageTool(providerRegistry))
@@ -572,4 +584,3 @@ func setupSkillsSystem(
 
 	return skillsLoader, skillSearchTool, globalSkillsDir, bundledSkillsDir, builtinSkillsDir
 }
-

@@ -13,15 +13,17 @@ import (
 
 // ToolsInvokeHandler handles POST /v1/tools/invoke (direct tool invocation).
 type ToolsInvokeHandler struct {
-	registry   *tools.Registry
-	agentStore store.AgentStore // nil if not configured
+	registry         *tools.Registry
+	agentStore       store.AgentStore       // nil if not configured
+	builtinToolStore store.BuiltinToolStore // nil if not configured
 }
 
 // NewToolsInvokeHandler creates a handler for the tools invoke endpoint.
-func NewToolsInvokeHandler(registry *tools.Registry, agentStore store.AgentStore) *ToolsInvokeHandler {
+func NewToolsInvokeHandler(registry *tools.Registry, agentStore store.AgentStore, builtinToolStore store.BuiltinToolStore) *ToolsInvokeHandler {
 	return &ToolsInvokeHandler{
-		registry:   registry,
-		agentStore: agentStore,
+		registry:         registry,
+		agentStore:       agentStore,
+		builtinToolStore: builtinToolStore,
 	}
 }
 
@@ -113,6 +115,13 @@ func (h *ToolsInvokeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.PeerKind != "" {
 		ctx = tools.WithToolPeerKind(ctx, req.PeerKind)
+	}
+	if h.builtinToolStore != nil {
+		if def, err := h.builtinToolStore.Get(ctx, req.Tool); err == nil && len(def.Settings) > 0 {
+			ctx = tools.WithBuiltinToolSettings(ctx, tools.BuiltinToolSettings{
+				req.Tool: def.Settings,
+			})
+		}
 	}
 
 	// Execute the tool

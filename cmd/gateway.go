@@ -27,14 +27,15 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/edition"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway"
-	"github.com/nextlevelbuilder/goclaw/internal/heartbeat"
 	"github.com/nextlevelbuilder/goclaw/internal/gateway/methods"
+	"github.com/nextlevelbuilder/goclaw/internal/heartbeat"
 	httpapi "github.com/nextlevelbuilder/goclaw/internal/http"
 	mcpbridge "github.com/nextlevelbuilder/goclaw/internal/mcp"
 	"github.com/nextlevelbuilder/goclaw/internal/media"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
+	"github.com/nextlevelbuilder/goclaw/internal/stickers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
 	"github.com/nextlevelbuilder/goclaw/internal/tasks"
@@ -162,7 +163,29 @@ func runGateway() {
 			slog.Info("system_configs applied to in-memory config", "keys", len(sysConfigs))
 		}
 	}
+	var stickerCaptureSvc *stickers.CaptureService
+	if pgStores.BuiltinTools != nil {
+		stickerCaptureSvc = stickers.NewCaptureService(pgStores.BuiltinTools, providerRegistry)
+	}
 	setupMemoryEmbeddings(pgStores, providerRegistry)
+	if embProvider := resolveEmbeddingProvider(pgStores.Providers, providerRegistry, pgStores.SystemConfigs); embProvider != nil {
+		if t, ok := toolsReg.Get("find_and_post_local_meme"); ok {
+			if ea, ok := t.(tools.EmbeddingProviderAware); ok {
+				ea.SetEmbeddingProvider(embProvider)
+				slog.Info("find_and_post_local_meme embeddings enabled", "provider", embProvider.Name(), "model", embProvider.Model())
+			}
+		}
+		if t, ok := toolsReg.Get(stickers.LocalStickerToolName); ok {
+			if ea, ok := t.(tools.EmbeddingProviderAware); ok {
+				ea.SetEmbeddingProvider(embProvider)
+				slog.Info("find_and_post_local_sticker embeddings enabled", "provider", embProvider.Name(), "model", embProvider.Model())
+			}
+		}
+		if stickerCaptureSvc != nil {
+			stickerCaptureSvc.SetEmbeddingProvider(embProvider)
+			slog.Info("telegram sticker capture embeddings enabled", "provider", embProvider.Name(), "model", embProvider.Model())
+		}
+	}
 
 	loadBootstrapFiles(pgStores, workspace, agentCfg)
 
@@ -327,6 +350,7 @@ func runGateway() {
 	server.SetPolicyEngine(permPE)
 	server.SetPairingService(pgStores.Pairing)
 	server.SetMessageBus(msgBus)
+	server.SetBuiltinToolStore(pgStores.BuiltinTools)
 	server.SetOAuthHandler(httpapi.NewOAuthHandler(pgStores.Providers, pgStores.ConfigSecrets, providerRegistry, msgBus))
 
 	// contextFileInterceptor is created inside wireExtras.
@@ -551,7 +575,7 @@ func runGateway() {
 		instanceLoader = channels.NewInstanceLoader(pgStores.ChannelInstances, pgStores.Agents, channelMgr, msgBus, pgStores.Pairing)
 		instanceLoader.SetProviderRegistry(providerRegistry)
 		instanceLoader.SetPendingCompactionConfig(cfg.Channels.PendingCompaction)
-		instanceLoader.RegisterFactory(channels.TypeTelegram, telegram.FactoryWithStores(pgStores.Agents, pgStores.ConfigPermissions, pgStores.Teams, pgStores.PendingMessages))
+		instanceLoader.RegisterFactory(channels.TypeTelegram, telegram.FactoryWithStores(pgStores.Agents, pgStores.ConfigPermissions, pgStores.Teams, pgStores.PendingMessages, stickerCaptureSvc))
 		instanceLoader.RegisterFactory(channels.TypeDiscord, discord.FactoryWithStores(pgStores.Agents, pgStores.ConfigPermissions, pgStores.PendingMessages))
 		instanceLoader.RegisterFactory(channels.TypeFeishu, feishu.FactoryWithPendingStore(pgStores.PendingMessages))
 		instanceLoader.RegisterFactory(channels.TypeZaloOA, zalo.Factory)
@@ -564,7 +588,7 @@ func runGateway() {
 	}
 
 	// Register config-based channels as fallback when no DB instances loaded.
-	registerConfigChannels(cfg, channelMgr, msgBus, pgStores, instanceLoader)
+	registerConfigChannels(cfg, channelMgr, msgBus, pgStores, instanceLoader, stickerCaptureSvc)
 
 	// Register channels/instances/links/teams RPC methods
 	wireChannelRPCMethods(server, pgStores, channelMgr, agentRouter, msgBus, workspace)

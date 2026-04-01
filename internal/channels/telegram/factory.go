@@ -7,6 +7,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/stickers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
@@ -28,7 +29,7 @@ type telegramInstanceConfig struct {
 	HistoryLimit    int      `json:"history_limit,omitempty"`
 	DMStream        *bool    `json:"dm_stream,omitempty"`
 	GroupStream     *bool    `json:"group_stream,omitempty"`
-	DraftTransport  *bool    `json:"draft_transport,omitempty"`   // sendMessageDraft for DM streaming (default true)
+	DraftTransport  *bool    `json:"draft_transport,omitempty"`  // sendMessageDraft for DM streaming (default true)
 	ReasoningStream *bool    `json:"reasoning_stream,omitempty"` // show reasoning as separate message (default true)
 	ReactionLevel   string   `json:"reaction_level,omitempty"`
 	MediaMaxMB      int64    `json:"media_max_mb,omitempty"`
@@ -42,19 +43,19 @@ type telegramInstanceConfig struct {
 // Factory creates a Telegram channel from DB instance data (no extra stores).
 func Factory(name string, creds json.RawMessage, cfg json.RawMessage,
 	msgBus *bus.MessageBus, pairingSvc store.PairingStore) (channels.Channel, error) {
-	return buildChannel(name, creds, cfg, msgBus, pairingSvc, nil, nil, nil, nil)
+	return buildChannel(name, creds, cfg, msgBus, pairingSvc, nil, nil, nil, nil, nil)
 }
 
 // FactoryWithStores returns a ChannelFactory that includes agent, configPerm, team, and pending message stores.
-func FactoryWithStores(agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, pendingStore store.PendingMessageStore) channels.ChannelFactory {
+func FactoryWithStores(agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, pendingStore store.PendingMessageStore, stickerCapture *stickers.CaptureService) channels.ChannelFactory {
 	return func(name string, creds json.RawMessage, cfg json.RawMessage,
 		msgBus *bus.MessageBus, pairingSvc store.PairingStore) (channels.Channel, error) {
-		return buildChannel(name, creds, cfg, msgBus, pairingSvc, agentStore, configPermStore, teamStore, pendingStore)
+		return buildChannel(name, creds, cfg, msgBus, pairingSvc, agentStore, configPermStore, teamStore, pendingStore, stickerCapture)
 	}
 }
 
 func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
-	msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, pendingStore store.PendingMessageStore) (channels.Channel, error) {
+	msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, pendingStore store.PendingMessageStore, stickerCapture *stickers.CaptureService) (channels.Channel, error) {
 
 	var c telegramCreds
 	if len(creds) > 0 {
@@ -84,25 +85,25 @@ func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
 	}
 
 	tgCfg := config.TelegramConfig{
-		Enabled:        true,
-		Token:          c.Token,
-		Proxy:          proxy,
-		APIServer:      apiServer,
-		AllowFrom:      ic.AllowFrom,
-		DMPolicy:       ic.DMPolicy,
-		GroupPolicy:    ic.GroupPolicy,
-		RequireMention: ic.RequireMention,
-		MentionMode:    ic.MentionMode,
-		HistoryLimit:   ic.HistoryLimit,
+		Enabled:         true,
+		Token:           c.Token,
+		Proxy:           proxy,
+		APIServer:       apiServer,
+		AllowFrom:       ic.AllowFrom,
+		DMPolicy:        ic.DMPolicy,
+		GroupPolicy:     ic.GroupPolicy,
+		RequireMention:  ic.RequireMention,
+		MentionMode:     ic.MentionMode,
+		HistoryLimit:    ic.HistoryLimit,
 		DMStream:        ic.DMStream,
 		GroupStream:     ic.GroupStream,
 		DraftTransport:  ic.DraftTransport,
 		ReasoningStream: ic.ReasoningStream,
 		ReactionLevel:   ic.ReactionLevel,
-		MediaMaxBytes:  resolveMediaMaxBytes(ic),
-		LinkPreview:    ic.LinkPreview,
-		BlockReply:     ic.BlockReply,
-		ForceIPv4:      ic.ForceIPv4,
+		MediaMaxBytes:   resolveMediaMaxBytes(ic),
+		LinkPreview:     ic.LinkPreview,
+		BlockReply:      ic.BlockReply,
+		ForceIPv4:       ic.ForceIPv4,
 	}
 
 	// DB instances default to "pairing" for groups (secure by default).
@@ -111,7 +112,7 @@ func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
 		tgCfg.GroupPolicy = "pairing"
 	}
 
-	ch, err := New(tgCfg, msgBus, pairingSvc, agentStore, configPermStore, teamStore, pendingStore)
+	ch, err := New(tgCfg, msgBus, pairingSvc, agentStore, configPermStore, teamStore, pendingStore, stickerCapture)
 	if err != nil {
 		return nil, err
 	}

@@ -17,6 +17,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/stickers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
@@ -27,26 +28,27 @@ type Channel struct {
 	config           config.TelegramConfig
 	httpClient       *http.Client
 	transport        *http.Transport
-	ipv4Once         sync.Once          // guards enableIPv4Only to prevent data race
+	ipv4Once         sync.Once // guards enableIPv4Only to prevent data race
 	pairingService   store.PairingStore
-	agentStore      store.AgentStore              // for agent key lookup (nil if not configured)
-	configPermStore store.ConfigPermissionStore   // for group file writer management (nil if not configured)
-	teamStore       store.TeamStore               // for /tasks, /task_detail commands (nil if not configured)
-	placeholders     sync.Map         // localKey string → messageID int
-	stopThinking     sync.Map         // localKey string → *thinkingCancel
-	typingCtrls      sync.Map         // localKey string → *typing.Controller
-	reactions        sync.Map         // localKey string → *StatusReactionController
-	pairingReplySent sync.Map         // userID string → time.Time (debounce pairing replies)
-	threadIDs        sync.Map         // localKey string → messageThreadID int (for forum topic routing)
-	approvedGroups   sync.Map         // chatIDStr string → true (cached group pairing approval)
+	agentStore       store.AgentStore            // for agent key lookup (nil if not configured)
+	configPermStore  store.ConfigPermissionStore // for group file writer management (nil if not configured)
+	teamStore        store.TeamStore             // for /tasks, /task_detail commands (nil if not configured)
+	placeholders     sync.Map                    // localKey string → messageID int
+	stopThinking     sync.Map                    // localKey string → *thinkingCancel
+	typingCtrls      sync.Map                    // localKey string → *typing.Controller
+	reactions        sync.Map                    // localKey string → *StatusReactionController
+	pairingReplySent sync.Map                    // userID string → time.Time (debounce pairing replies)
+	threadIDs        sync.Map                    // localKey string → messageThreadID int (for forum topic routing)
+	approvedGroups   sync.Map                    // chatIDStr string → true (cached group pairing approval)
 	groupHistory     *channels.PendingHistory
+	stickerCapture   *stickers.CaptureService
 	historyLimit     int
 	requireMention   bool
-	mentionMode      string // "strict" (default) or "yield"
+	mentionMode      string             // "strict" (default) or "yield"
 	pollCancel       context.CancelFunc // cancels the long polling context
-	pollDone         chan struct{}       // closed when polling goroutine exits
+	pollDone         chan struct{}      // closed when polling goroutine exits
 	handlerWg        sync.WaitGroup     // tracks in-flight handler goroutines for graceful shutdown
-	handlerSem       chan struct{}       // bounded semaphore for concurrent handler goroutines
+	handlerSem       chan struct{}      // bounded semaphore for concurrent handler goroutines
 	pendingDraftID   sync.Map           // localKey string → int (draftID)
 }
 
@@ -65,7 +67,7 @@ func (c *thinkingCancel) Cancel() {
 // agentStore is optional (nil = group file writer commands disabled).
 // configPermStore is optional (nil = group file writer commands disabled).
 // teamStore is optional (nil = /tasks, /task_detail commands disabled).
-func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, pendingStore store.PendingMessageStore) (*Channel, error) {
+func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, pendingStore store.PendingMessageStore, stickerCapture *stickers.CaptureService) (*Channel, error) {
 	var opts []telego.BotOption
 
 	if cfg.APIServer != "" {
@@ -135,6 +137,7 @@ func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.Pai
 		configPermStore: configPermStore,
 		teamStore:       teamStore,
 		groupHistory:    channels.MakeHistory(channels.TypeTelegram, pendingStore, base.TenantID()),
+		stickerCapture:  stickerCapture,
 		historyLimit:    historyLimit,
 		requireMention:  requireMention,
 		mentionMode:     mentionMode,

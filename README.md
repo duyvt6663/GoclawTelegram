@@ -176,6 +176,13 @@ make build
 source .env.local && ./goclaw
 ```
 
+If you don't want to install Go locally, build the host binary via Docker instead:
+
+```bash
+make build-docker VERSION=v2.44.10
+./goclaw onboard
+```
+
 ### With Docker
 
 ```bash

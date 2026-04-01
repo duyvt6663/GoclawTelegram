@@ -25,33 +25,33 @@ type SystemPromptConfig struct {
 	AgentID       string
 	Model         string
 	Workspace     string
-	Channel       string                 // runtime channel instance name (e.g. "my-telegram-bot")
-	ChannelType   string                 // platform type (e.g. "zalo_personal", "telegram")
-	ChatTitle     string                 // group chat display name (shown in identity line)
-	PeerKind      string                 // "direct" or "group"
-	OwnerIDs      []string               // owner sender IDs
-	Mode          PromptMode             // full or minimal
-	ToolNames     []string               // registered tool names
-	SkillsSummary string                 // XML from skills.Loader.BuildSummary()
-	HasMemory     bool                   // memory_search/memory_get available?
-	HasSpawn      bool                   // spawn tool available?
-	HasTeam        bool                   // agent belongs to a team? (skips generic spawn section)
-	TeamWorkspace  string                 // absolute path to team shared workspace (empty if not in team)
-	TeamMembers    []store.TeamMemberData // team member roster for task assignment
-	TeamGuidance   string                 // edition-specific guidance from TeamActionPolicy.MemberGuidance()
+	Channel       string                  // runtime channel instance name (e.g. "my-telegram-bot")
+	ChannelType   string                  // platform type (e.g. "zalo_personal", "telegram")
+	ChatTitle     string                  // group chat display name (shown in identity line)
+	PeerKind      string                  // "direct" or "group"
+	OwnerIDs      []string                // owner sender IDs
+	Mode          PromptMode              // full or minimal
+	ToolNames     []string                // registered tool names
+	SkillsSummary string                  // XML from skills.Loader.BuildSummary()
+	HasMemory     bool                    // memory_search/memory_get available?
+	HasSpawn      bool                    // spawn tool available?
+	HasTeam       bool                    // agent belongs to a team? (skips generic spawn section)
+	TeamWorkspace string                  // absolute path to team shared workspace (empty if not in team)
+	TeamMembers   []store.TeamMemberData  // team member roster for task assignment
+	TeamGuidance  string                  // edition-specific guidance from TeamActionPolicy.MemberGuidance()
 	ContextFiles  []bootstrap.ContextFile // bootstrap files for # Project Context
-	ExtraPrompt   string                 // extra system prompt (subagent context, etc.)
-	AgentType     string                 // "open" or "predefined" — affects context file framing
+	ExtraPrompt   string                  // extra system prompt (subagent context, etc.)
+	AgentType     string                  // "open" or "predefined" — affects context file framing
 
-	HasSkillSearch     bool              // skill_search tool registered? (for search-mode prompt)
-	HasSkillManage     bool              // skill_manage tool registered + skill_evolve enabled for this agent
-	HasMCPToolSearch   bool              // mcp_tool_search tool registered? (MCP search mode)
-	HasKnowledgeGraph  bool              // knowledge_graph_search tool registered?
-	MCPToolDescs       map[string]string // MCP tool name → description (inline mode only)
+	HasSkillSearch    bool              // skill_search tool registered? (for search-mode prompt)
+	HasSkillManage    bool              // skill_manage tool registered + skill_evolve enabled for this agent
+	HasMCPToolSearch  bool              // mcp_tool_search tool registered? (MCP search mode)
+	HasKnowledgeGraph bool              // knowledge_graph_search tool registered?
+	MCPToolDescs      map[string]string // MCP tool name → description (inline mode only)
 
 	// Sandbox info — matching TS sandboxInfo in system-prompt.ts
-	SandboxEnabled       bool   // exec tool runs inside Docker sandbox?
-	SandboxContainerDir  string // container-side workdir (e.g. "/workspace")
+	SandboxEnabled         bool   // exec tool runs inside Docker sandbox?
+	SandboxContainerDir    string // container-side workdir (e.g. "/workspace")
 	SandboxWorkspaceAccess string // "none", "ro", "rw"
 
 	// Self-evolution: predefined agents can update SOUL.md (style/tone)
@@ -73,42 +73,45 @@ type SystemPromptConfig struct {
 // coreToolSummaries maps tool names to one-line descriptions.
 // Shown in the ## Tooling section of the system prompt.
 var coreToolSummaries = map[string]string{
-	"read_file":     "Read file contents",
-	"write_file":    "Create or overwrite files",
-	"list_files":    "List directory contents",
-	"exec":          "Run shell commands",
-	"memory_search": "Search indexed memory files (MEMORY.md + memory/*.md)",
-	"memory_get":    "Read specific sections of memory files",
-	"spawn":         "Spawn a self-clone subagent to handle a task in the background",
-	"web_search":    "Search the web",
-	"web_fetch":     "Fetch and extract content from a URL",
-	"datetime":      "Get current date/time with timezone support — use before creating cron jobs or time-sensitive operations",
-	"cron":          "Manage scheduled jobs and reminders — use for user-requested tasks at specific times or intervals (e.g. 'remind me at 9am', 'check weather every morning')",
-	"heartbeat":     "Manage agent heartbeat — periodic background monitoring with HEARTBEAT.md checklist. Use for autonomous proactive check-ins (e.g. 'monitor server status every 30 min'). Unlike cron, heartbeat auto-suppresses 'all OK' responses via HEARTBEAT_OK",
-	"skill_search":     "Search available skills by keyword (weather, translate, github, etc.)",
-	"skill_manage":     "Create, patch, or delete skills from conversation experience",
-	"publish_skill":    "Register a skill directory in the system database, making it discoverable",
-	"use_skill":        "Invoke a skill by name and follow its instructions",
-	"mcp_tool_search":  "Search for available MCP external integration tools by keyword",
-	"browser":          "Browse web pages interactively",
-	"tts":              "Convert text to speech audio",
-	"edit":             "Edit a file by replacing exact text matches",
-	"message":          "Send a PROACTIVE message to another channel/chat — do NOT use this to reply to the user, just respond directly",
-	"sessions_list":    "List sessions for this agent",
-	"session_status":   "Show session status (model, tokens, compaction count)",
-	"sessions_history": "Fetch message history for a session",
-	"sessions_send":    "Send a message into another session",
-	"read_image":       "Analyze images when the user asks about them or when understanding the image is needed to answer. Call with the path attribute from <media:image> tags. You CAN see images through this tool. Never say you cannot see images",
-	"read_audio":       "Analyze audio when the user asks about it or references audio content. Call with the media_id from <media:audio> tags. You CAN hear audio through this tool",
-	"read_video":       "Analyze video when the user asks about it or references video content. Call with the media_id from <media:video> tags. You CAN see video through this tool",
-	"create_video":     "Generate videos from text descriptions using AI",
-	"read_document":    "Analyze documents (PDF, DOCX, etc.) attached to the conversation. Call this when you see <media:document> tags. If this tool fails, use a relevant skill instead (e.g. pdf skill with exec tool). The path attribute in <media:document path=\"...\"> is a directly accessible file in your workspace — use it directly, no need to copy",
-	"create_image":            "Generate images from text descriptions using AI",
-	"create_audio":            "Generate music or sound effects from text descriptions using AI",
-	"knowledge_graph_search":  "Find people, projects, and their connections — use for relationship questions (who works with whom, project dependencies) that memory_search may miss",
-	"team_tasks":              "Team task board — track progress, manage dependencies (spawn auto-creates delegation tasks)",
-	"list_group_members":      "List all members of the current group chat (Feishu/Lark only)",
-	"create_forum_topic":      "Create a forum topic in a Telegram supergroup",
+	"read_file":                   "Read file contents",
+	"write_file":                  "Create or overwrite files",
+	"list_files":                  "List directory contents",
+	"exec":                        "Run shell commands",
+	"memory_search":               "Search indexed memory files (MEMORY.md + memory/*.md)",
+	"memory_get":                  "Read specific sections of memory files",
+	"spawn":                       "Spawn a self-clone subagent to handle a task in the background",
+	"web_search":                  "Search the web",
+	"web_fetch":                   "Fetch and extract content from a URL",
+	"datetime":                    "Get current date/time with timezone support — use before creating cron jobs or time-sensitive operations",
+	"cron":                        "Manage scheduled jobs and reminders — use for user-requested tasks at specific times or intervals (e.g. 'remind me at 9am', 'check weather every morning')",
+	"heartbeat":                   "Manage agent heartbeat — periodic background monitoring with HEARTBEAT.md checklist. Use for autonomous proactive check-ins (e.g. 'monitor server status every 30 min'). Unlike cron, heartbeat auto-suppresses 'all OK' responses via HEARTBEAT_OK",
+	"skill_search":                "Search available skills by keyword (weather, translate, github, etc.)",
+	"skill_manage":                "Create, patch, or delete skills from conversation experience",
+	"publish_skill":               "Register a skill directory in the system database, making it discoverable",
+	"use_skill":                   "Invoke a skill by name and follow its instructions",
+	"mcp_tool_search":             "Search for available MCP external integration tools by keyword",
+	"browser":                     "Browse web pages interactively",
+	"tts":                         "Convert text to speech audio",
+	"edit":                        "Edit a file by replacing exact text matches",
+	"message":                     "Send a PROACTIVE message to another channel/chat — do NOT use this to reply to the user, just respond directly",
+	"find_and_post_meme":          "Find an online meme or reaction image and attach it to the current reply — use only when local reaction media does not fit",
+	"find_and_post_local_meme":    "Attach a local meme GIF, video, or image from configured libraries — use for reaction clips and meme replies before searching the web",
+	"find_and_post_local_sticker": "Attach a previously learned Telegram sticker from saved libraries — prefer this for quick Telegram reactions and recurring favorites",
+	"sessions_list":               "List sessions for this agent",
+	"session_status":              "Show session status (model, tokens, compaction count)",
+	"sessions_history":            "Fetch message history for a session",
+	"sessions_send":               "Send a message into another session",
+	"read_image":                  "Analyze images when the user asks about them or when understanding the image is needed to answer. Call with the path attribute from <media:image> tags. This includes static stickers and sticker preview frames. You CAN see images through this tool. Never say you cannot see images",
+	"read_audio":                  "Analyze audio when the user asks about it or references audio content. Call with the media_id from <media:audio> tags. You CAN hear audio through this tool",
+	"read_video":                  "Analyze video when the user asks about it or references video content. Call with the media_id from <media:video> tags. This includes Telegram video stickers and GIF-like animations delivered as video. You CAN see video through this tool",
+	"create_video":                "Generate videos from text descriptions using AI",
+	"read_document":               "Analyze documents (PDF, DOCX, etc.) attached to the conversation. Call this when you see <media:document> tags. If this tool fails, use a relevant skill instead (e.g. pdf skill with exec tool). The path attribute in <media:document path=\"...\"> is a directly accessible file in your workspace — use it directly, no need to copy",
+	"create_image":                "Generate images from text descriptions using AI",
+	"create_audio":                "Generate music or sound effects from text descriptions using AI",
+	"knowledge_graph_search":      "Find people, projects, and their connections — use for relationship questions (who works with whom, project dependencies) that memory_search may miss",
+	"team_tasks":                  "Team task board — track progress, manage dependencies (spawn auto-creates delegation tasks)",
+	"list_group_members":          "List all members of the current group chat (Feishu/Lark only)",
+	"create_forum_topic":          "Create a forum topic in a Telegram supergroup",
 
 	// Legacy tool aliases — kept for backward compatibility with older clients
 	"edit_file":      "Alias for edit — Edit a file by replacing exact text matches",
@@ -278,6 +281,11 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 		lines = append(lines, buildGroupChatReplyHint()...)
 	}
 
+	// 9.7. Telegram reaction media hint — bias expressive replies toward saved stickers/local memes
+	if hint := buildReactionMediaHint(cfg.ChannelType, cfg.ToolNames); hint != nil {
+		lines = append(lines, hint...)
+	}
+
 	// 10. Extra system prompt (wrapped in tags for context isolation)
 	if cfg.ExtraPrompt != "" {
 		header := "## Additional Context"
@@ -390,6 +398,7 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 			`  <media:image id="..." path="...">`,
 			`  <media:video id="...">, <media:audio id="...">, <media:document path="...">`,
 			"Use the corresponding read_* tool (with the path or media_id) to analyze them when the user asks about them or when understanding the media is needed to answer.",
+			"If a user asks what a sticker, GIF, or reaction clip shows, inspect the actual media with read_image/read_video. Do NOT guess from metadata such as emoji, sticker-set name, or filename.",
 			"You have full vision/audio/video capabilities through these tools.",
 			"NEVER say you cannot see images or files — always use the tools when relevant.",
 		)
@@ -541,5 +550,3 @@ func buildWorkspaceSection(workspace string, sandboxEnabled bool, containerDir s
 		"",
 	}
 }
-
-

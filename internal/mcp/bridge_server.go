@@ -163,6 +163,10 @@ func mimeFromExt(ext string) string {
 	switch strings.ToLower(ext) {
 	case ".webp":
 		return "image/webp"
+	case ".webm":
+		return "video/webm"
+	case ".tgs":
+		return "application/x-tgsticker"
 	case ".opus":
 		return "audio/ogg"
 	case ".md":

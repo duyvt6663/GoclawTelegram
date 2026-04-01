@@ -3,6 +3,8 @@ package telegram
 import (
 	"strings"
 	"testing"
+
+	"github.com/mymmrac/telego"
 )
 
 // --- buildMediaTags tests ---
@@ -146,5 +148,100 @@ func TestBuildMediaTags_UnknownType(t *testing.T) {
 	got := buildMediaTags(items)
 	if got != "" {
 		t.Errorf("expected empty string for unknown type, got: %q", got)
+	}
+}
+
+func TestBuildMediaTags_WithNote(t *testing.T) {
+	items := []MediaInfo{{Type: "image", Note: "Telegram sticker (emoji 😼)."}}
+	got := buildMediaTags(items)
+	if !strings.Contains(got, "<media:image>") {
+		t.Fatalf("expected image tag, got %q", got)
+	}
+	if !strings.Contains(got, "<note>Telegram sticker (emoji 😼).</note>") {
+		t.Fatalf("expected note block, got %q", got)
+	}
+}
+
+func TestLightweightMediaTags_Sticker(t *testing.T) {
+	msg := &telego.Message{
+		Sticker: &telego.Sticker{
+			Emoji:      "😼",
+			SetName:    "cat_pack",
+			IsAnimated: true,
+		},
+	}
+	got := lightweightMediaTags(msg)
+	if got != "[sent an animated sticker 😼 from set cat_pack]" {
+		t.Fatalf("lightweightMediaTags(sticker) = %q", got)
+	}
+}
+
+func TestExtractMediaRefs_StickerUsesPreviewForAnimated(t *testing.T) {
+	msg := &telego.Message{
+		Sticker: &telego.Sticker{
+			FileID:     "sticker-file",
+			FileSize:   1234,
+			IsAnimated: true,
+			Emoji:      "😼",
+			SetName:    "cat_pack",
+			Thumbnail:  &telego.PhotoSize{FileID: "thumb-file", FileSize: 321},
+		},
+	}
+
+	refs := extractMediaRefs(msg)
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got %d", len(refs))
+	}
+	if refs[0].Type != "image" {
+		t.Fatalf("expected animated sticker preview to resolve as image, got %q", refs[0].Type)
+	}
+	if refs[0].FileID != "thumb-file" {
+		t.Fatalf("expected thumbnail file id, got %q", refs[0].FileID)
+	}
+	if refs[0].Note == "" || !strings.Contains(refs[0].Note, "animated sticker preview") {
+		t.Fatalf("expected animated sticker note, got %q", refs[0].Note)
+	}
+}
+
+func TestExtractMediaRefs_VideoStickerIncludesPreviewAndVideo(t *testing.T) {
+	msg := &telego.Message{
+		Sticker: &telego.Sticker{
+			FileID:    "video-sticker",
+			FileSize:  2048,
+			IsVideo:   true,
+			Emoji:     "🐟",
+			SetName:   "fish_pack",
+			Thumbnail: &telego.PhotoSize{FileID: "video-thumb", FileSize: 256},
+		},
+	}
+
+	refs := extractMediaRefs(msg)
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 refs, got %d", len(refs))
+	}
+	if refs[0].Type != "image" || refs[0].FileID != "video-thumb" {
+		t.Fatalf("expected preview image first, got %#v", refs[0])
+	}
+	if refs[1].Type != "video" || refs[1].FileID != "video-sticker" {
+		t.Fatalf("expected video sticker second, got %#v", refs[1])
+	}
+	if !strings.Contains(refs[0].Note, "preview frame") {
+		t.Fatalf("expected preview note, got %q", refs[0].Note)
+	}
+	if !strings.Contains(refs[1].Note, "read_video") {
+		t.Fatalf("expected video note to mention read_video, got %q", refs[1].Note)
+	}
+}
+
+func TestLightweightTagForType_Sticker(t *testing.T) {
+	msg := &telego.Message{
+		Sticker: &telego.Sticker{
+			Emoji:   "😼",
+			SetName: "cat_pack",
+		},
+	}
+	got := lightweightTagForType("sticker", msg)
+	if got != "[sent a sticker 😼 from set cat_pack]" {
+		t.Fatalf("lightweightTagForType(sticker) = %q", got)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"html"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -29,10 +30,11 @@ var (
 )
 
 const (
-	sendMaxRetries     = 3
-	sendRetryDelay     = 2 * time.Second
-	maxSplitDepth      = 5               // max recursion depth for "message too long" splitting
-	photoSizeThreshold = 5 * 1024 * 1024 // 5 MB — images larger than this are sent as documents to avoid Telegram compression
+	sendMaxRetries          = 3
+	sendRetryDelay          = 2 * time.Second
+	maxSplitDepth           = 5               // max recursion depth for "message too long" splitting
+	photoSizeThreshold      = 5 * 1024 * 1024 // 5 MB — images larger than this are sent as documents to avoid Telegram compression
+	telegramFileIDURLPrefix = "telegram-file-id:"
 )
 
 // stripHTML removes HTML tags and unescapes HTML entities for plain-text fallback.
@@ -299,6 +301,26 @@ func (c *Channel) sendMediaMessage(ctx context.Context, chatID int64, msg bus.Ou
 				caption = ""
 			}
 		}
+		if isStickerMedia(media.ContentType, media.URL) && caption != "" && followUpText == "" {
+			followUpText = caption
+			caption = ""
+		}
+
+		if stickerFileID := telegramFileIDFromMediaURL(media.URL); stickerFileID != "" {
+			if err := c.sendStickerByFileID(ctx, chatIDObj, stickerFileID, replyTo, threadID); err != nil {
+				return err
+			}
+			replyTo = 0
+			if followUpText != "" {
+				chunks := chunkHTML(followUpText, telegramMaxMessageLen)
+				for _, chunk := range chunks {
+					if err := c.sendHTML(ctx, chatID, chunk, 0, threadID); err != nil {
+						return err
+					}
+				}
+			}
+			continue
+		}
 
 		// Honor MediaMaxBytes for outbound sends.
 		// Prevents attempting to upload huge files that would fail via Telegram Bot API or local proxy.
@@ -318,6 +340,14 @@ func (c *Channel) sendMediaMessage(ctx context.Context, chatID int64, msg bus.Ou
 		// Large images (>photoSizeThreshold) are sent as documents to avoid Telegram compression.
 		ct := strings.ToLower(media.ContentType)
 		switch {
+		case isStickerMedia(ct, media.URL):
+			if err := c.sendSticker(ctx, chatIDObj, media.URL, replyTo, threadID); err != nil {
+				return err
+			}
+		case isAnimationMedia(ct, media.URL):
+			if err := c.sendAnimation(ctx, chatIDObj, media.URL, caption, replyTo, threadID); err != nil {
+				return err
+			}
 		case strings.HasPrefix(ct, "image/"):
 			sendAsDoc := false
 			if info, statErr := os.Stat(media.URL); statErr == nil && info.Size() > photoSizeThreshold {
@@ -360,6 +390,35 @@ func (c *Channel) sendMediaMessage(ctx context.Context, chatID int64, msg bus.Ou
 		}
 	}
 	return nil
+}
+
+func isAnimationMedia(contentType, path string) bool {
+	if strings.EqualFold(contentType, "image/gif") {
+		return true
+	}
+	return strings.EqualFold(filepath.Ext(path), ".gif")
+}
+
+func isStickerMedia(contentType, path string) bool {
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	lowerPath := strings.ToLower(path)
+	ext := strings.ToLower(filepath.Ext(path))
+	hasStickerHint := strings.Contains(lowerPath, "sticker")
+
+	switch {
+	case telegramFileIDFromMediaURL(path) != "":
+		return true
+	case ct == "application/x-tgsticker", ct == "application/x-telegram-sticker", ct == "application/x-tgs":
+		return true
+	case ext == ".tgs":
+		return true
+	case (ct == "image/webp" || ext == ".webp") && hasStickerHint:
+		return true
+	case (ct == "video/webm" || ext == ".webm") && hasStickerHint:
+		return true
+	default:
+		return false
+	}
 }
 
 // sendHTML sends a single HTML message, falling back to plain text if Telegram rejects the HTML.
@@ -491,6 +550,127 @@ func (c *Channel) sendPhoto(ctx context.Context, chatID telego.ChatID, filePath,
 		file.Seek(0, 0)
 		params.MessageThreadID = 0
 		_, err = c.bot.SendPhoto(ctx, params)
+	}
+	return err
+}
+
+// sendAnimation sends a GIF/animation message.
+func (c *Channel) sendAnimation(ctx context.Context, chatID telego.ChatID, filePath, caption string, replyTo, threadID int) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open animation %s: %w", filePath, err)
+	}
+	defer file.Close()
+
+	params := &telego.SendAnimationParams{
+		ChatID:    chatID,
+		Animation: telego.InputFile{File: file},
+		Caption:   caption,
+	}
+	if caption != "" {
+		params.ParseMode = telego.ModeHTML
+	}
+	if sendThreadID := resolveThreadIDForSend(threadID); sendThreadID > 0 {
+		params.MessageThreadID = sendThreadID
+	}
+	if replyTo > 0 {
+		params.ReplyParameters = &telego.ReplyParameters{MessageID: replyTo, AllowSendingWithoutReply: true}
+	}
+
+	err = c.retrySend(ctx, "sendAnimation", func() { file.Seek(0, 0) }, func(ctx context.Context) error {
+		_, e := c.bot.SendAnimation(ctx, params)
+		return e
+	})
+	if err != nil && parseErrRe.MatchString(err.Error()) {
+		slog.Warn("sendAnimation: HTML parse failed, retrying with plain text caption", "error", err)
+		file.Seek(0, 0)
+		params.ParseMode = ""
+		params.Caption = stripHTML(params.Caption)
+		_, err = c.bot.SendAnimation(ctx, params)
+	}
+	if err != nil && params.MessageThreadID != 0 && threadNotFoundRe.MatchString(err.Error()) {
+		slog.Warn("sendAnimation: thread not found, retrying without thread", "thread_id", params.MessageThreadID)
+		file.Seek(0, 0)
+		params.MessageThreadID = 0
+		_, err = c.bot.SendAnimation(ctx, params)
+	}
+	return err
+}
+
+func sendStickerInput(filePath string, file *os.File) telego.InputFile {
+	if stickerFileID := telegramFileIDFromMediaURL(filePath); stickerFileID != "" {
+		return telego.InputFile{FileID: stickerFileID}
+	}
+	return telego.InputFile{File: file}
+}
+
+func telegramFileIDFromMediaURL(mediaURL string) string {
+	if !strings.HasPrefix(mediaURL, telegramFileIDURLPrefix) {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(mediaURL, telegramFileIDURLPrefix))
+}
+
+// sendSticker sends a Telegram sticker. Stickers do not support captions.
+func (c *Channel) sendSticker(ctx context.Context, chatID telego.ChatID, filePath string, replyTo, threadID int) error {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open sticker %s: %w", filePath, err)
+	}
+	defer file.Close()
+
+	params := &telego.SendStickerParams{
+		ChatID:  chatID,
+		Sticker: sendStickerInput(filePath, file),
+	}
+	if sendThreadID := resolveThreadIDForSend(threadID); sendThreadID > 0 {
+		params.MessageThreadID = sendThreadID
+	}
+	if replyTo > 0 {
+		params.ReplyParameters = &telego.ReplyParameters{MessageID: replyTo, AllowSendingWithoutReply: true}
+	}
+
+	err = c.retrySend(ctx, "sendSticker", func() { file.Seek(0, 0) }, func(ctx context.Context) error {
+		_, e := c.bot.SendSticker(ctx, params)
+		return e
+	})
+	if err != nil && params.MessageThreadID != 0 && threadNotFoundRe.MatchString(err.Error()) {
+		slog.Warn("sendSticker: thread not found, retrying without thread", "thread_id", params.MessageThreadID)
+		file.Seek(0, 0)
+		params.MessageThreadID = 0
+		_, err = c.bot.SendSticker(ctx, params)
+	}
+	if err != nil && strings.EqualFold(filepath.Ext(filePath), ".webm") {
+		slog.Warn("sendSticker: sticker upload failed, retrying as video", "path", filePath, "error", err)
+		if videoErr := c.sendVideo(ctx, chatID, filePath, "", replyTo, threadID); videoErr == nil {
+			return nil
+		} else {
+			slog.Warn("sendSticker: video fallback failed", "path", filePath, "error", videoErr)
+		}
+	}
+	return err
+}
+
+func (c *Channel) sendStickerByFileID(ctx context.Context, chatID telego.ChatID, fileID string, replyTo, threadID int) error {
+	params := &telego.SendStickerParams{
+		ChatID:  chatID,
+		Sticker: telego.InputFile{FileID: fileID},
+	}
+	if sendThreadID := resolveThreadIDForSend(threadID); sendThreadID > 0 {
+		params.MessageThreadID = sendThreadID
+	}
+	if replyTo > 0 {
+		params.ReplyParameters = &telego.ReplyParameters{MessageID: replyTo, AllowSendingWithoutReply: true}
+	}
+
+	err := c.retrySend(ctx, "sendStickerByFileID", nil, func(ctx context.Context) error {
+		_, e := c.bot.SendSticker(ctx, params)
+		return e
+	})
+	if err != nil && params.MessageThreadID != 0 && threadNotFoundRe.MatchString(err.Error()) {
+		slog.Warn("sendStickerByFileID: thread not found, retrying without thread", "thread_id", params.MessageThreadID)
+		params.MessageThreadID = 0
+		_, err = c.bot.SendSticker(ctx, params)
 	}
 	return err
 }

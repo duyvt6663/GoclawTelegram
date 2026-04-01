@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -55,22 +56,23 @@ func loadImages(files []bus.MediaFile) []providers.ImageContent {
 }
 
 // persistMedia sanitizes images, saves all media files to the per-user workspace
-// .uploads/ directory, and returns lightweight MediaRefs with persisted paths.
-// All media types (images, documents, audio, video) are stored within the user's
-// workspace for filesystem-level tenant isolation.
+// .uploads/ directory when available, and falls back to the shared media store
+// when the workspace upload directory cannot be used. This keeps current-turn
+// media usable instead of dropping it on the floor when a workspace path is
+// temporarily unavailable or unwritable.
 // workspace is the per-user workspace path from ToolWorkspaceFromCtx(ctx).
 func (l *Loop) persistMedia(sessionKey string, files []bus.MediaFile, workspace string) []providers.MediaRef {
-	if workspace == "" {
-		slog.Warn("media: no workspace, cannot persist media")
-		return nil
+	uploadsDir := ""
+	uploadsReady := false
+	if workspace != "" {
+		uploadsDir = filepath.Join(workspace, ".uploads")
+		if err := os.MkdirAll(uploadsDir, 0755); err != nil {
+			slog.Warn("media: failed to create .uploads dir, falling back to media store",
+				"dir", uploadsDir, "error", err, "agent", l.id)
+		} else {
+			uploadsReady = true
+		}
 	}
-
-	uploadsDir := filepath.Join(workspace, ".uploads")
-	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
-		slog.Warn("media: failed to create .uploads dir", "dir", uploadsDir, "error", err)
-		return nil
-	}
-
 	var refs []providers.MediaRef
 	for _, f := range files {
 		mime := f.MimeType
@@ -82,6 +84,11 @@ func (l *Loop) persistMedia(sessionKey string, files []bus.MediaFile, workspace 
 		// Sanitize images before persistent storage.
 		srcPath := f.Path
 		var sanitizedTemp string // track temp file for cleanup
+		cleanupSanitized := func() {
+			if sanitizedTemp != "" {
+				_ = os.Remove(sanitizedTemp)
+			}
+		}
 		if kind == "image" {
 			sanitized, err := SanitizeImage(f.Path)
 			if err != nil {
@@ -93,33 +100,84 @@ func (l *Loop) persistMedia(sessionKey string, files []bus.MediaFile, workspace 
 			}
 		}
 
-		id := uuid.New().String()
-		ext := media.ExtFromMime(mime)
-		if ext == "" {
-			ext = filepath.Ext(srcPath) // fallback to source extension
-		}
-		dstPath := filepath.Join(uploadsDir, id+ext)
-
-		if err := copyMediaFile(srcPath, dstPath); err != nil {
-			slog.Warn("media: failed to persist file", "path", f.Path, "error", err)
-			if sanitizedTemp != "" {
-				os.Remove(sanitizedTemp)
+		if uploadsReady {
+			id := uuid.New().String()
+			ext := media.ExtFromMime(mime)
+			if ext == "" {
+				ext = filepath.Ext(srcPath) // fallback to source extension
 			}
+			dstPath := filepath.Join(uploadsDir, id+ext)
+
+			if err := copyMediaFile(srcPath, dstPath); err == nil {
+				cleanupSanitized()
+				refs = append(refs, providers.MediaRef{
+					ID:       id,
+					MimeType: mime,
+					Kind:     kind,
+					Path:     dstPath,
+				})
+				slog.Debug("media: persisted file", "id", id, "kind", kind, "path", dstPath, "agent", l.id)
+				continue
+			} else {
+				slog.Warn("media: failed to persist file in workspace uploads, falling back to media store",
+					"path", f.Path, "dst", dstPath, "error", err, "agent", l.id)
+			}
+		}
+
+		if l.mediaStore == nil {
+			slog.Warn("media: fallback media store unavailable, falling back to temp storage", "path", f.Path, "agent", l.id)
+		} else {
+			id, dstPath, err := l.mediaStore.SaveFile(sessionKey, srcPath, mime)
+			if err == nil {
+				cleanupSanitized()
+				refs = append(refs, providers.MediaRef{
+					ID:       id,
+					MimeType: mime,
+					Kind:     kind,
+					Path:     dstPath,
+				})
+				slog.Debug("media: persisted file via media store", "id", id, "kind", kind, "path", dstPath, "agent", l.id)
+				continue
+			}
+			slog.Warn("media: failed to persist file in media store, falling back to temp storage",
+				"path", f.Path, "error", err, "agent", l.id)
+		}
+
+		id, dstPath, err := persistMediaTemp(sessionKey, srcPath, mime)
+		if err != nil {
+			slog.Warn("media: failed to persist file in temp storage", "path", f.Path, "error", err, "agent", l.id)
+			cleanupSanitized()
 			continue
 		}
-		if sanitizedTemp != "" {
-			os.Remove(sanitizedTemp) // cleanup sanitized temp file
-		}
-
+		cleanupSanitized()
 		refs = append(refs, providers.MediaRef{
 			ID:       id,
 			MimeType: mime,
 			Kind:     kind,
 			Path:     dstPath,
 		})
-		slog.Debug("media: persisted file", "id", id, "kind", kind, "path", dstPath, "agent", l.id)
+		slog.Debug("media: persisted file via temp storage", "id", id, "kind", kind, "path", dstPath, "agent", l.id)
 	}
 	return refs
+}
+
+func persistMediaTemp(sessionKey, srcPath, mime string) (string, string, error) {
+	sum := sha256.Sum256([]byte(sessionKey))
+	dir := filepath.Join(os.TempDir(), "goclaw-media", fmt.Sprintf("%x", sum[:6]))
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", "", fmt.Errorf("create temp media dir: %w", err)
+	}
+
+	id := uuid.New().String()
+	ext := media.ExtFromMime(mime)
+	if ext == "" {
+		ext = filepath.Ext(srcPath)
+	}
+	dstPath := filepath.Join(dir, id+ext)
+	if err := copyMediaFile(srcPath, dstPath); err != nil {
+		return "", "", err
+	}
+	return id, dstPath, nil
 }
 
 // copyMediaFile copies src to dst using buffered I/O.

@@ -43,6 +43,9 @@ func BuildMediaTags(mediaList []MediaInfo) string {
 				tag = "<media:document>"
 			}
 		}
+		if tag != "" && m.Note != "" {
+			tag += fmt.Sprintf("\n<note>%s</note>", html.EscapeString(m.Note))
+		}
 		if tag != "" {
 			if m.FromReply {
 				tag += " (from replied message)"

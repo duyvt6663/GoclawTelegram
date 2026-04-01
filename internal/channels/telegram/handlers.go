@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,7 +14,83 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/typing"
+	"github.com/nextlevelbuilder/goclaw/internal/stickers"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
+
+type telegramSenderInfo struct {
+	userID      string
+	senderID    string
+	username    string
+	firstName   string
+	lastName    string
+	label       string
+	isBot       bool
+	contactType string
+}
+
+func resolveTelegramSenderInfo(message *telego.Message) *telegramSenderInfo {
+	if message == nil {
+		return nil
+	}
+	if user := message.From; user != nil {
+		userID := fmt.Sprintf("%d", user.ID)
+		senderID := userID
+		if user.Username != "" {
+			senderID = fmt.Sprintf("%s|%s", userID, user.Username)
+		}
+
+		label := user.FirstName
+		if user.Username != "" {
+			label = "@" + user.Username
+		}
+		if label == "" {
+			label = userID
+		}
+
+		return &telegramSenderInfo{
+			userID:      userID,
+			senderID:    senderID,
+			username:    user.Username,
+			firstName:   user.FirstName,
+			lastName:    user.LastName,
+			label:       label,
+			isBot:       user.IsBot,
+			contactType: "user",
+		}
+	}
+	if senderChat := message.SenderChat; senderChat != nil {
+		userID := fmt.Sprintf("sender_chat:%d", senderChat.ID)
+		senderID := userID
+		if senderChat.Username != "" {
+			senderID = fmt.Sprintf("%s|%s", userID, senderChat.Username)
+		}
+
+		label := senderChat.Title
+		if label == "" && senderChat.Username != "" {
+			label = "@" + senderChat.Username
+		}
+		if label == "" {
+			label = userID
+		}
+
+		contactType := senderChat.Type
+		if contactType == "" {
+			contactType = "chat"
+		}
+
+		return &telegramSenderInfo{
+			userID:      userID,
+			senderID:    senderID,
+			username:    senderChat.Username,
+			firstName:   senderChat.Title,
+			label:       label,
+			contactType: contactType,
+		}
+	}
+
+	return nil
+}
 
 // handleMessage processes an incoming Telegram update.
 func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
@@ -34,16 +111,17 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		return
 	}
 
-	user := message.From
-	if user == nil {
+	sender := resolveTelegramSenderInfo(message)
+	if sender == nil {
+		slog.Debug("telegram message skipped: missing sender identity",
+			"chat_id", message.Chat.ID,
+			"chat_type", message.Chat.Type,
+		)
 		return
 	}
 
-	userID := fmt.Sprintf("%d", user.ID)
-	senderID := userID
-	if user.Username != "" {
-		senderID = fmt.Sprintf("%s|%s", userID, user.Username)
-	}
+	userID := sender.userID
+	senderID := sender.senderID
 
 	isGroup := message.Chat.Type == "group" || message.Chat.Type == "supergroup"
 
@@ -51,8 +129,8 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		"chat_type", message.Chat.Type,
 		"chat_id", message.Chat.ID,
 		"is_group", isGroup,
-		"user_id", user.ID,
-		"username", user.Username,
+		"user_id", userID,
+		"username", sender.username,
 		"channel", c.Name(),
 		"text_preview", channels.Truncate(message.Text, 60),
 	)
@@ -114,7 +192,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 			}
 			if !allowed {
 				slog.Debug("telegram group message rejected by allowlist",
-					"user_id", userID, "username", user.Username, "chat_id", chatID,
+					"user_id", userID, "username", sender.username, "chat_id", chatID,
 				)
 				return
 			}
@@ -140,7 +218,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		case "allowlist":
 			if !c.IsAllowed(userID) && !c.IsAllowed(senderID) {
 				slog.Debug("telegram message rejected by allowlist",
-					"user_id", userID, "username", user.Username,
+					"user_id", userID, "username", sender.username,
 				)
 				return
 			}
@@ -162,9 +240,9 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 
 			if !paired && !inAllowList {
 				slog.Debug("telegram message rejected: sender not paired",
-					"user_id", userID, "username", user.Username, "dm_policy", dmPolicy,
+					"user_id", userID, "username", sender.username, "dm_policy", dmPolicy,
 				)
-				c.sendPairingReply(ctx, message.Chat.ID, userID, user.Username)
+				c.sendPairingReply(ctx, message.Chat.ID, userID, sender.username)
 				return
 			}
 		}
@@ -226,10 +304,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	}
 
 	// Compute sender label for group context (used in history + current message annotation)
-	senderLabel := user.FirstName
-	if user.Username != "" {
-		senderLabel = "@" + user.Username
-	}
+	senderLabel := sender.label
 
 	// --- Group mention gating (matching TS mentionGate logic) ---
 	// Also check implicit mention via reply-to-bot
@@ -245,7 +320,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		// In yield mode, skip messages from other bots to prevent infinite loops.
 		// Bot A responds → Bot B sees it as "no specific mention" → responds → loop.
 		// Only skip when our bot is NOT explicitly mentioned — allow cross-bot @commands.
-		if mentionMode == "yield" && user.IsBot && user.Username != botUsername && !c.detectMention(message, botUsername) {
+		if mentionMode == "yield" && sender.isBot && sender.username != botUsername && !c.detectMention(message, botUsername) {
 			// Respect pairing guard — don't record history in unpaired groups.
 			if topicCfg.groupPolicy == "pairing" && c.pairingService != nil {
 				if _, cached := c.approvedGroups.Load(chatIDStr); !cached {
@@ -263,6 +338,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 					}
 				}
 			}
+			c.captureStickerAsync(message, chatIDStr, nil)
 			c.groupHistory.Record(localKey, channels.HistoryEntry{
 				Sender:    senderLabel,
 				SenderID:  senderID,
@@ -319,6 +395,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 				}
 			}
 
+			c.captureStickerAsync(message, chatIDStr, nil)
 			c.groupHistory.Record(localKey, channels.HistoryEntry{
 				Sender:    senderLabel,
 				SenderID:  senderID,
@@ -330,8 +407,11 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 
 			// Collect contact even when bot is not mentioned (cache prevents DB spam).
 			if cc := c.ContactCollector(); cc != nil {
-				contactName := strings.TrimSpace(user.FirstName + " " + user.LastName)
-				cc.EnsureContact(ctx, c.Type(), c.Name(), userID, userID, contactName, user.Username, "group", "user")
+				contactName := strings.TrimSpace(sender.firstName + " " + sender.lastName)
+				if contactName == "" {
+					contactName = senderLabel
+				}
+				cc.EnsureContact(ctx, c.Type(), c.Name(), senderID, userID, contactName, sender.username, "group", sender.contactType)
 				// Also collect group chat itself as a contact (for group permission / merge).
 				cc.EnsureContact(ctx, c.Type(), c.Name(), chatIDStr, "", message.Chat.Title, "", "group", "group")
 			}
@@ -366,6 +446,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	// Deferred until after mention + pairing gates to avoid downloading
 	// media for messages that only get recorded in pending history.
 	mediaList, mediaErrors := c.resolveMedia(ctx, message)
+	c.captureStickerAsync(message, chatIDStr, mediaList)
 	if message.ReplyToMessage != nil {
 		replyMedia, replyErrors := c.resolveMedia(ctx, message.ReplyToMessage)
 		if len(replyMedia) > 0 {
@@ -398,6 +479,9 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 					m.Transcript = transcript
 				}
 			case "document":
+				if strings.EqualFold(filepath.Ext(m.FileName), ".tgs") && strings.Contains(strings.ToLower(m.Note), "sticker") {
+					break
+				}
 				if m.FileName != "" && m.FilePath != "" {
 					docContent, err := extractDocumentContent(m.FilePath, m.FileName)
 					if err != nil {
@@ -538,11 +622,17 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 
 	metadata := map[string]string{
 		"message_id": fmt.Sprintf("%d", message.MessageID),
-		"user_id":    fmt.Sprintf("%d", user.ID),
-		"username":   user.Username,
-		"first_name": user.FirstName,
+		"user_id":    userID,
+		"username":   sender.username,
+		"first_name": sender.firstName,
 		"is_group":   fmt.Sprintf("%t", isGroup),
 		"local_key":  localKey,
+	}
+	if sender.lastName != "" {
+		metadata["last_name"] = sender.lastName
+	}
+	if sender.contactType != "user" {
+		metadata["contact_type"] = sender.contactType
 	}
 	if message.Chat.Title != "" {
 		metadata["chat_title"] = message.Chat.Title
@@ -585,7 +675,11 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 
 	// Collect contact for processed messages (DM + group-mentioned).
 	if cc := c.ContactCollector(); cc != nil {
-		cc.EnsureContact(ctx, c.Type(), c.Name(), senderID, userID, user.FirstName, user.Username, peerKind, "user")
+		contactName := sender.firstName
+		if contactName == "" {
+			contactName = senderLabel
+		}
+		cc.EnsureContact(ctx, c.Type(), c.Name(), senderID, userID, contactName, sender.username, peerKind, sender.contactType)
 		// Also collect group chat itself as a contact (for group permission / merge).
 		if isGroup {
 			cc.EnsureContact(ctx, c.Type(), c.Name(), chatIDStr, "", message.Chat.Title, "", "group", "group")
@@ -611,4 +705,172 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	if isGroup {
 		c.groupHistory.Clear(localKey)
 	}
+}
+
+func (c *Channel) captureStickerAsync(message *telego.Message, chatIDStr string, mediaList []MediaInfo) {
+	if c == nil || c.stickerCapture == nil || message == nil || message.Sticker == nil {
+		return
+	}
+
+	sticker := message.Sticker
+	mediaCopy := append([]MediaInfo(nil), mediaList...)
+	channelName := c.Name()
+	channelType := c.Type()
+	tenantID := c.TenantID()
+	messageID := fmt.Sprintf("%d", message.MessageID)
+
+	go func() {
+		captureCtx, cancel := context.WithTimeout(store.WithTenantID(context.Background(), tenantID), 45*time.Second)
+		defer cancel()
+
+		input, err := c.buildStickerCaptureInput(captureCtx, sticker, chatIDStr, messageID, mediaCopy)
+		if err != nil {
+			if shouldSkipStickerCaptureError(err) {
+				slog.Debug("telegram sticker capture skipped",
+					"channel", channelName,
+					"chat_id", chatIDStr,
+					"message_id", messageID,
+					"error", err,
+				)
+				return
+			}
+			slog.Warn("telegram sticker capture prepare failed",
+				"channel", channelName,
+				"chat_id", chatIDStr,
+				"message_id", messageID,
+				"error", err,
+			)
+			return
+		}
+		input.TenantID = tenantID
+		input.ChannelName = channelName
+		input.ChannelType = channelType
+
+		if err := c.stickerCapture.CaptureTelegramSticker(captureCtx, input); err != nil {
+			if shouldSkipStickerCaptureError(err) {
+				slog.Debug("telegram sticker capture skipped",
+					"channel", channelName,
+					"chat_id", chatIDStr,
+					"message_id", messageID,
+					"error", err,
+				)
+				return
+			}
+			slog.Warn("telegram sticker capture failed",
+				"channel", channelName,
+				"chat_id", chatIDStr,
+				"message_id", messageID,
+				"error", err,
+			)
+			return
+		}
+		slog.Debug("telegram sticker captured",
+			"channel", channelName,
+			"chat_id", chatIDStr,
+			"message_id", messageID,
+			"sticker_type", input.StickerType,
+		)
+	}()
+}
+
+func (c *Channel) buildStickerCaptureInput(ctx context.Context, sticker *telego.Sticker, chatIDStr, messageID string, mediaList []MediaInfo) (stickers.CaptureInput, error) {
+	if sticker == nil {
+		return stickers.CaptureInput{}, fmt.Errorf("missing sticker")
+	}
+
+	input := stickers.CaptureInput{
+		ChatID:           chatIDStr,
+		MessageID:        messageID,
+		StickerType:      telegramStickerType(sticker),
+		Emoji:            strings.TrimSpace(sticker.Emoji),
+		SetName:          strings.TrimSpace(sticker.SetName),
+		Note:             buildStickerNote(sticker, false),
+		AssetContentType: telegramStickerContentType(sticker),
+		AssetFileID:      strings.TrimSpace(sticker.FileID),
+	}
+
+	if media := findTelegramMediaByFileID(mediaList, sticker.FileID); media != nil {
+		input.AssetPath = media.FilePath
+		if media.ContentType != "" {
+			input.AssetContentType = media.ContentType
+		}
+	}
+	if sticker.Thumbnail != nil {
+		input.PreviewFileID = strings.TrimSpace(sticker.Thumbnail.FileID)
+		if preview := findTelegramMediaByFileID(mediaList, sticker.Thumbnail.FileID); preview != nil {
+			input.PreviewPath = preview.FilePath
+			input.PreviewContentType = preview.ContentType
+		}
+	}
+
+	if strings.TrimSpace(input.AssetPath) == "" {
+		assetPath, err := c.downloadMedia(ctx, sticker.FileID, c.mediaMaxBytes())
+		if err != nil {
+			return stickers.CaptureInput{}, fmt.Errorf("download sticker asset: %w", err)
+		}
+		assetPath = renameDownloadedSticker(assetPath)
+		input.AssetPath = assetPath
+		input.AssetContentType = detectDownloadedMIME(assetPath, input.AssetContentType)
+	}
+	if sticker.Thumbnail != nil && strings.TrimSpace(input.PreviewPath) == "" {
+		previewPath, err := c.downloadMedia(ctx, sticker.Thumbnail.FileID, c.mediaMaxBytes())
+		if err != nil {
+			return stickers.CaptureInput{}, fmt.Errorf("download sticker preview: %w", err)
+		}
+		input.PreviewPath = renameDownloadedSticker(previewPath)
+		input.PreviewContentType = detectDownloadedMIME(input.PreviewPath, "image/webp")
+	}
+
+	return input, nil
+}
+
+func findTelegramMediaByFileID(mediaList []MediaInfo, fileID string) *MediaInfo {
+	fileID = strings.TrimSpace(fileID)
+	if fileID == "" {
+		return nil
+	}
+	for i := range mediaList {
+		if mediaList[i].FileID == fileID {
+			return &mediaList[i]
+		}
+	}
+	return nil
+}
+
+func telegramStickerType(sticker *telego.Sticker) string {
+	if sticker == nil {
+		return ""
+	}
+	switch {
+	case sticker.IsVideo:
+		return "video"
+	case sticker.IsAnimated:
+		return "animated"
+	default:
+		return "static"
+	}
+}
+
+func telegramStickerContentType(sticker *telego.Sticker) string {
+	if sticker == nil {
+		return "application/octet-stream"
+	}
+	switch {
+	case sticker.IsVideo:
+		return "video/webm"
+	case sticker.IsAnimated:
+		return "application/x-tgsticker"
+	default:
+		return "image/webp"
+	}
+}
+
+func shouldSkipStickerCaptureError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "local sticker auto capture is disabled") ||
+		strings.Contains(msg, "no local sticker libraries are configured") ||
+		strings.Contains(msg, "no local sticker library is configured")
 }

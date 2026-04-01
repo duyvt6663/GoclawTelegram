@@ -1,11 +1,77 @@
 VERSION ?= $(shell git describe --tags --abbrev=0 --match "v[0-9]*" 2>/dev/null || echo dev)
 LDFLAGS  = -s -w -X github.com/nextlevelbuilder/goclaw/cmd.Version=$(VERSION)
 BINARY   = goclaw
+DOCKER_GO_IMAGE ?= golang:1.26-bookworm
 
-.PHONY: build run clean version up down logs reset test vet check-web dev migrate setup ci desktop-dev desktop-build desktop-dmg
+UNAME_S := $(shell uname -s 2>/dev/null)
+UNAME_M := $(shell uname -m 2>/dev/null)
 
-build:
+ifeq ($(UNAME_S),Darwin)
+HOST_GOOS := darwin
+else ifeq ($(UNAME_S),Linux)
+HOST_GOOS := linux
+else
+HOST_GOOS := $(shell printf '%s' "$(UNAME_S)" | tr '[:upper:]' '[:lower:]')
+endif
+
+ifeq ($(UNAME_M),x86_64)
+HOST_GOARCH := amd64
+else ifeq ($(UNAME_M),amd64)
+HOST_GOARCH := amd64
+else ifeq ($(UNAME_M),aarch64)
+HOST_GOARCH := arm64
+else ifeq ($(UNAME_M),arm64)
+HOST_GOARCH := arm64
+else
+HOST_GOARCH := $(UNAME_M)
+endif
+
+BUILD_GOOS ?= $(HOST_GOOS)
+BUILD_GOARCH ?= $(HOST_GOARCH)
+
+.PHONY: build build-docker run clean version up down logs reset test vet check-web dev migrate setup ci desktop-dev desktop-build desktop-dmg check-go check-docker check-wails
+
+check-go:
+	@command -v go >/dev/null 2>&1 || { \
+		echo "Go 1.26+ is required but 'go' was not found on PATH."; \
+		echo "Install Go and rerun 'make build', or use 'make build-docker VERSION=$(VERSION)'."; \
+		exit 127; \
+	}
+
+check-docker:
+	@command -v docker >/dev/null 2>&1 || { \
+		echo "Docker is required for this target but 'docker' was not found on PATH."; \
+		exit 127; \
+	}
+	@docker info >/dev/null 2>&1 || { \
+		echo "Docker is installed but the daemon is not reachable."; \
+		echo "Start Docker Desktop (or the Docker daemon) and rerun 'make build-docker VERSION=$(VERSION)'."; \
+		exit 125; \
+	}
+
+check-wails:
+	@command -v wails >/dev/null 2>&1 || { \
+		echo "Wails CLI is required for desktop targets but 'wails' was not found on PATH."; \
+		echo "Install it with 'go install github.com/wailsapp/wails/v2/cmd/wails@latest'."; \
+		exit 127; \
+	}
+
+build: check-go
 	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o $(BINARY) .
+
+build-docker: check-docker
+	docker run --rm \
+		-u "$$(id -u):$$(id -g)" \
+		-v "$(CURDIR):/src" \
+		-w /src \
+		-e HOME=/tmp \
+		-e GOCACHE=/tmp/go-build \
+		-e GOMODCACHE=/tmp/go-mod \
+		-e CGO_ENABLED=0 \
+		-e GOOS=$(BUILD_GOOS) \
+		-e GOARCH=$(BUILD_GOARCH) \
+		$(DOCKER_GO_IMAGE) \
+		go build -ldflags="$(LDFLAGS)" -o $(BINARY) .
 
 run: build
 	./$(BINARY)
@@ -56,10 +122,10 @@ reset: version-file
 	$(COMPOSE) down -v
 	$(COMPOSE) up -d --build
 
-test:
+test: check-go
 	go test -race ./...
 
-vet:
+vet: check-go
 	go vet ./...
 
 check-web:
@@ -71,7 +137,7 @@ dev:
 migrate:
 	$(COMPOSE) run --rm goclaw migrate up
 
-setup:
+setup: check-go
 	go mod download
 	cd ui/web && pnpm install --frozen-lockfile
 
@@ -79,13 +145,13 @@ ci: build test vet check-web
 
 # ── Desktop (Wails + SQLite) ──
 
-desktop-dev:
+desktop-dev: check-go check-wails
 	cd ui/desktop && wails dev -tags sqliteonly
 
-desktop-build:
+desktop-build: check-go check-wails
 	cd ui/desktop && wails build -tags sqliteonly -ldflags="-s -w -X github.com/nextlevelbuilder/goclaw/cmd.Version=$(VERSION)"
 
-desktop-dmg: desktop-build
+desktop-dmg: check-go check-wails desktop-build
 	@echo "Creating DMG..."
 	rm -rf /tmp/goclaw-dmg-staging
 	mkdir -p /tmp/goclaw-dmg-staging

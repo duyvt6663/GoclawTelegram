@@ -33,8 +33,8 @@ func NewMessageTool(workspace string, restrict bool) *MessageTool {
 	return &MessageTool{workspace: workspace, restrict: restrict}
 }
 
-func (t *MessageTool) SetChannelSender(s ChannelSender)              { t.sender = s }
-func (t *MessageTool) SetMessageBus(b *bus.MessageBus)               { t.msgBus = b }
+func (t *MessageTool) SetChannelSender(s ChannelSender)               { t.sender = s }
+func (t *MessageTool) SetMessageBus(b *bus.MessageBus)                { t.msgBus = b }
 func (t *MessageTool) SetChannelTenantChecker(c ChannelTenantChecker) { t.tenantChecker = c }
 
 func (t *MessageTool) Name() string { return "message" }
@@ -61,7 +61,7 @@ func (t *MessageTool) Parameters() map[string]any {
 			},
 			"message": map[string]any{
 				"type":        "string",
-				"description": "Message content to send. To send a file as attachment, use the prefix MEDIA: followed by the file path, e.g. 'MEDIA:docs/report.pdf' or 'MEDIA:/tmp/image.png'. The file will be uploaded as a document/photo/audio depending on its type.",
+				"description": "Message content to send. To send a file as attachment, use the prefix MEDIA: followed by the file path, e.g. 'MEDIA:docs/report.pdf' or 'MEDIA:/tmp/image.png'. The file will be uploaded as a document/photo/audio/sticker depending on its type.",
 			},
 		},
 		"required": []string{"action", "message"},
@@ -282,8 +282,12 @@ func mimeFromPath(path string) string {
 		return "image/gif"
 	case ".webp":
 		return "image/webp"
+	case ".webm":
+		return "video/webm"
 	case ".mp4":
 		return "video/mp4"
+	case ".tgs":
+		return "application/x-tgsticker"
 	case ".ogg", ".opus":
 		return "audio/ogg"
 	case ".mp3":

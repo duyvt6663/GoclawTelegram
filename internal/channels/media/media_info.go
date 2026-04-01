@@ -23,5 +23,6 @@ type MediaInfo struct {
 	FileName    string // original filename
 	FileSize    int64
 	Transcript  string // STT transcript for audio/voice (empty if not transcribed)
+	Note        string // optional context note (e.g. sticker emoji/set, preview hint)
 	FromReply   bool   // true if media came from a replied-to/quoted message
 }
