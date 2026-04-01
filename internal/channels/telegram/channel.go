@@ -32,8 +32,9 @@ type Channel struct {
 	pairingService   store.PairingStore
 	agentStore       store.AgentStore            // for agent key lookup (nil if not configured)
 	configPermStore  store.ConfigPermissionStore // for group file writer management (nil if not configured)
-	teamStore        store.TeamStore             // for /tasks, /task_detail commands (nil if not configured)
-	placeholders     sync.Map                    // localKey string → messageID int
+	teamStore         store.TeamStore             // for /tasks, /task_detail commands (nil if not configured)
+	subagentTaskStore store.SubagentTaskStore     // for /subagents, /subagent commands (nil if not configured)
+	placeholders      sync.Map                   // localKey string → messageID int
 	stopThinking     sync.Map                    // localKey string → *thinkingCancel
 	typingCtrls      sync.Map                    // localKey string → *typing.Controller
 	reactions        sync.Map                    // localKey string → *StatusReactionController
@@ -67,7 +68,8 @@ func (c *thinkingCancel) Cancel() {
 // agentStore is optional (nil = group file writer commands disabled).
 // configPermStore is optional (nil = group file writer commands disabled).
 // teamStore is optional (nil = /tasks, /task_detail commands disabled).
-func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, pendingStore store.PendingMessageStore, stickerCapture *stickers.CaptureService) (*Channel, error) {
+// subagentTaskStore is optional (nil = /subagents, /subagent commands disabled).
+func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, subagentTaskStore store.SubagentTaskStore, pendingStore store.PendingMessageStore, stickerCapture *stickers.CaptureService) (*Channel, error) {
 	var opts []telego.BotOption
 
 	if cfg.APIServer != "" {
@@ -134,9 +136,10 @@ func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.Pai
 		transport:       transport,
 		pairingService:  pairingSvc,
 		agentStore:      agentStore,
-		configPermStore: configPermStore,
-		teamStore:       teamStore,
-		groupHistory:    channels.MakeHistory(channels.TypeTelegram, pendingStore, base.TenantID()),
+		configPermStore:   configPermStore,
+		teamStore:         teamStore,
+		subagentTaskStore: subagentTaskStore,
+		groupHistory:      channels.MakeHistory(channels.TypeTelegram, pendingStore, base.TenantID()),
 		stickerCapture:  stickerCapture,
 		historyLimit:    historyLimit,
 		requireMention:  requireMention,
