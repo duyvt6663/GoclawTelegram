@@ -57,14 +57,14 @@ func TestShouldReplyToReactionMediaWithoutMention(t *testing.T) {
 	}
 }
 
-func TestShouldSampleStickerReaction_DeterministicAndMixed(t *testing.T) {
+func TestShouldSampleReaction_DeterministicAndMixed(t *testing.T) {
 	msg := &telego.Message{
 		MessageID: 42,
 		Chat:      telego.Chat{ID: -10012345},
 		Sticker:   &telego.Sticker{FileID: "sticker-file-id"},
 	}
-	first := shouldSampleStickerReaction(msg)
-	second := shouldSampleStickerReaction(msg)
+	first := shouldSampleReaction(msg, 30)
+	second := shouldSampleReaction(msg, 30)
 	if first != second {
 		t.Fatalf("expected deterministic sticker sampling, got %v then %v", first, second)
 	}
@@ -77,7 +77,7 @@ func TestShouldSampleStickerReaction_DeterministicAndMixed(t *testing.T) {
 			Chat:      telego.Chat{ID: -10012345},
 			Sticker:   &telego.Sticker{FileID: "sticker-file-id"},
 		}
-		if shouldReplyToReactionMediaWithoutMention(msg) {
+		if shouldSampleReaction(msg, 30) {
 			sawTrue = true
 		} else {
 			sawFalse = true
@@ -85,6 +85,24 @@ func TestShouldSampleStickerReaction_DeterministicAndMixed(t *testing.T) {
 	}
 	if !sawTrue || !sawFalse {
 		t.Fatalf("expected sticker sampling to allow and skip across a small sample, got allow=%v skip=%v", sawTrue, sawFalse)
+	}
+}
+
+func TestReactionWorthCommentRate_AccumulatesKeywordHits(t *testing.T) {
+	msg := &telego.Message{
+		Text: "dcm m ngu vl",
+	}
+	if got := reactionWorthCommentRate(msg); got != 60 {
+		t.Fatalf("reactionWorthCommentRate() = %d, want 60", got)
+	}
+}
+
+func TestReactionWorthCommentRate_NormalizesVietnameseD(t *testing.T) {
+	msg := &telego.Message{
+		Text: "đmm ngu vl",
+	}
+	if got := reactionWorthCommentRate(msg); got != 60 {
+		t.Fatalf("reactionWorthCommentRate() = %d, want 60", got)
 	}
 }
 
@@ -99,6 +117,7 @@ func TestAppendSystemPrompt(t *testing.T) {
 
 func TestImplicitReactionMediaSystemPromptPrefersMedia(t *testing.T) {
 	wantContains := []string{
+		"reaction-worthy comment",
 		"override the usual text-first rule",
 		"`find_and_post_local_sticker`",
 		"`find_and_post_local_meme`",
