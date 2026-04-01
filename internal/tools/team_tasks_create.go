@@ -234,6 +234,16 @@ func (t *TeamTasksTool) executeCreate(ctx context.Context, args map[string]any) 
 		return ErrorResult("failed to create task: " + err.Error())
 	}
 
+	// Auto-copy files referenced in subject+description from leader's personal workspace
+	// to team workspace so members can access them.
+	if isLead {
+		personalWs := ToolWorkspaceFromCtx(ctx)
+		searchText := subject + "\n" + description
+		if n := autoShareFiles(searchText, personalWs, teamWsDir); n > 0 {
+			slog.Info("team_tasks.create: auto-shared files", "count", n, "task_id", task.ID)
+		}
+	}
+
 	// Persist media files copied during task creation as DB attachments,
 	// so the UI and queries see them in team_task_attachments table.
 	// (Members get auto-attached via WorkspaceInterceptor, but leaders
@@ -290,6 +300,7 @@ func (t *TeamTasksTool) executeCreate(ctx context.Context, args map[string]any) 
 					WithOwnerAgentKey(t.manager.AgentKeyFromID(ctx, assigneeID)),
 					WithChannel(task.Channel),
 					WithChatID(task.ChatID),
+					WithPeerKind(ToolPeerKindFromCtx(ctx)),
 				))
 				t.manager.DispatchTaskToAgent(ctx, task, team, assigneeID)
 			}

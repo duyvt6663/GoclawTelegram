@@ -10,18 +10,31 @@ import {
 import { StickySaveBar } from "@/components/shared/sticky-save-bar";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { PROVIDER_TYPES } from "@/constants/providers";
 import { toast } from "@/stores/use-toast-store";
 import { useProviders } from "../hooks/use-providers";
+import { useProviderModels } from "../hooks/use-provider-models";
 import { useProviderVerify } from "../hooks/use-provider-verify";
 import { ProviderOAuthAccountSection } from "./provider-oauth-account-section";
 import {
   buildProviderSettingsWithChatGPTOAuthRouting,
+  buildProviderSettingsWithReasoningDefaults,
   getChatGPTOAuthProviderRouting,
   getEmbeddingSettings,
+  getProviderReasoningDefaults,
+  normalizeReasoningEffort,
+  normalizeReasoningFallback,
+  deriveLegacyThinkingLevel,
 } from "@/types/provider";
 import type { ProviderData, ProviderInput } from "@/types/provider";
 import type { ChatGPTOAuthRoutingConfig } from "@/types/agent";
@@ -50,6 +63,9 @@ const NO_EMBEDDING_TYPES = new Set([
   "suno",
   "anthropic_native",
 ]);
+const SIMPLE_REASONING_LEVELS = new Set(["off", "low", "medium", "high"]);
+const ADVANCED_REASONING_LEVELS = ["off", "auto", "none", "minimal", "low", "medium", "high", "xhigh"] as const;
+const REASONING_FALLBACKS = ["downgrade", "provider_default", "off"] as const;
 
 function providerStatus(
   providerName: string,
@@ -96,8 +112,9 @@ function providerFormSignature(input: {
   embEnabled: boolean;
   embModel: string;
   embApiBase: string;
-  embDimensions: string;
   routing: ChatGPTOAuthRoutingConfig;
+  reasoningEffort: string;
+  reasoningFallback: string;
   isOAuth: boolean;
 }): string {
   return JSON.stringify({
@@ -107,8 +124,16 @@ function providerFormSignature(input: {
     embEnabled: input.embEnabled,
     embModel: input.embModel,
     embApiBase: input.embApiBase,
-    embDimensions: input.embDimensions,
     routing: input.isOAuth ? routingSignature(input.routing) : "",
+    reasoning: reasoningSignature(input.reasoningEffort, input.reasoningFallback),
+  });
+}
+
+
+function reasoningSignature(effort: string, fallback: string): string {
+  return JSON.stringify({
+    effort: normalizeReasoningEffort(effort) || "off",
+    fallback: normalizeReasoningFallback(fallback),
   });
 }
 
@@ -116,6 +141,10 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
   const { t } = useTranslation("providers");
   const { t: tc } = useTranslation("common");
   const { providers } = useProviders();
+  const {
+    models: providerModels,
+    reasoningDefaults: providerReasoningDefaults,
+  } = useProviderModels(provider.id);
   const { statuses } = useChatGPTOAuthProviderStatuses(providers);
 
   const typeInfo = PROVIDER_TYPES.find((pt) => pt.value === provider.provider_type);
@@ -165,6 +194,11 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
   );
 
   const initialRouting = getChatGPTOAuthProviderRouting(provider.settings);
+  const initialReasoningDefaults = getProviderReasoningDefaults(provider.settings)
+    ?? providerReasoningDefaults
+    ?? null;
+  const initialReasoningEffort = initialReasoningDefaults?.effort ?? "off";
+  const initialReasoningFallback = initialReasoningDefaults?.fallback ?? "downgrade";
 
   const [displayName, setDisplayName] = useState(provider.display_name || "");
   const [apiKey, setApiKey] = useState(provider.api_key || "");
@@ -173,13 +207,63 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
     strategy: initialRouting?.strategy ?? "primary_first",
     extra_provider_names: initialRouting?.extraProviderNames ?? [],
   });
+  const selectedPoolProviderNames = useMemo(
+    () =>
+      canEditPoolRouting
+        ? Array.from(
+            new Set(
+              [provider.name, ...(poolRouting.extra_provider_names ?? [])]
+                .filter(Boolean)
+                .filter((name) => name === provider.name || providerByName.has(name)),
+            ),
+          )
+        : [provider.name],
+    [canEditPoolRouting, poolRouting.extra_provider_names, provider.name, providerByName],
+  );
 
   const initEmb = getEmbeddingSettings(provider.settings);
   const [embEnabled, setEmbEnabled] = useState(initEmb?.enabled ?? false);
   const [embModel, setEmbModel] = useState(initEmb?.model ?? "");
   const [embApiBase, setEmbApiBase] = useState(initEmb?.api_base ?? "");
-  const [embDimensions, setEmbDimensions] = useState(initEmb?.dimensions ? String(initEmb.dimensions) : "");
+  const [reasoningThinkingLevel, setReasoningThinkingLevel] = useState(
+    deriveLegacyThinkingLevel(initialReasoningEffort),
+  );
+  const [reasoningEffort, setReasoningEffort] = useState(initialReasoningEffort);
+  const [reasoningFallback, setReasoningFallback] = useState(initialReasoningFallback);
+  const [reasoningExpert, setReasoningExpert] = useState(
+    Boolean(initialReasoningDefaults) && (
+      !SIMPLE_REASONING_LEVELS.has(initialReasoningEffort)
+      || initialReasoningFallback !== "downgrade"
+    ),
+  );
+  const [reasoningPreviewModel, setReasoningPreviewModel] = useState("");
   const syncedProviderIDRef = useRef(provider.id);
+  const reasoningCapableModels = useMemo(
+    () => providerModels.filter((model) => (model.reasoning?.levels?.length ?? 0) > 0),
+    [providerModels],
+  );
+  const reasoningPreviewEntry = useMemo(
+    () => reasoningCapableModels.find((model) => model.id === reasoningPreviewModel)
+      ?? reasoningCapableModels[0]
+      ?? null,
+    [reasoningCapableModels, reasoningPreviewModel],
+  );
+  const reasoningPreviewCapability = reasoningPreviewEntry?.reasoning ?? null;
+  const showReasoningDefaults = Boolean(initialReasoningDefaults) || reasoningCapableModels.length > 0;
+  const savedReasoningSignature = useMemo(
+    () => reasoningSignature(
+      initialReasoningDefaults?.effort ?? "off",
+      initialReasoningDefaults?.fallback ?? "downgrade",
+    ),
+    [initialReasoningDefaults?.effort, initialReasoningDefaults?.fallback],
+  );
+  const draftReasoningSignature = useMemo(
+    () => reasoningSignature(
+      reasoningExpert ? reasoningEffort : reasoningThinkingLevel,
+      reasoningExpert ? reasoningFallback : "downgrade",
+    ),
+    [reasoningEffort, reasoningExpert, reasoningFallback, reasoningThinkingLevel],
+  );
 
   const savedFormSignature = useMemo(
     () =>
@@ -192,14 +276,15 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
         embEnabled: initEmb?.enabled ?? false,
         embModel: initEmb?.model ?? "",
         embApiBase: initEmb?.api_base ?? "",
-        embDimensions: initEmb?.dimensions ? String(initEmb.dimensions) : "",
         routing: {
           strategy: initialRouting?.strategy ?? "primary_first",
           extra_provider_names: initialRouting?.extraProviderNames ?? [],
         },
+        reasoningEffort: initialReasoningDefaults?.effort ?? "off",
+        reasoningFallback: initialReasoningDefaults?.fallback ?? "downgrade",
         isOAuth,
       }),
-    [initEmb?.api_base, initEmb?.dimensions, initEmb?.enabled, initEmb?.model, initialRouting?.extraProviderNames, initialRouting?.strategy, isOAuth, provider.api_key, provider.display_name, provider.enabled, showApiKey],
+    [initEmb?.api_base, initEmb?.enabled, initEmb?.model, initialReasoningDefaults?.effort, initialReasoningDefaults?.fallback, initialRouting?.extraProviderNames, initialRouting?.strategy, isOAuth, provider.api_key, provider.display_name, provider.enabled, showApiKey],
   );
   const savedFormSignatureRef = useRef(savedFormSignature);
   const draftFormSignature = useMemo(
@@ -213,26 +298,36 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
         embEnabled,
         embModel,
         embApiBase,
-        embDimensions,
         routing: poolRouting,
+        reasoningEffort: reasoningExpert ? reasoningEffort : reasoningThinkingLevel,
+        reasoningFallback: reasoningExpert ? reasoningFallback : "downgrade",
         isOAuth,
       }),
-    [apiKey, displayName, embApiBase, embDimensions, embEnabled, embModel, enabled, isOAuth, poolRouting, provider.api_key, showApiKey],
+    [apiKey, displayName, embApiBase, embEnabled, embModel, enabled, isOAuth, poolRouting, provider.api_key, reasoningEffort, reasoningExpert, reasoningFallback, reasoningThinkingLevel, showApiKey],
   );
 
   useEffect(() => {
     const nextProviderID = provider.id;
     const es = getEmbeddingSettings(provider.settings);
     const routing = getChatGPTOAuthProviderRouting(provider.settings);
+    const reasoning = getProviderReasoningDefaults(provider.settings) ?? providerReasoningDefaults;
     const syncFromProvider = () => {
       setEmbEnabled(es?.enabled ?? false);
       setEmbModel(es?.model ?? "");
       setEmbApiBase(es?.api_base ?? "");
-      setEmbDimensions(es?.dimensions ? String(es.dimensions) : "");
       setPoolRouting({
         strategy: routing?.strategy ?? "primary_first",
         extra_provider_names: routing?.extraProviderNames ?? [],
       });
+      const nextReasoningEffort = reasoning?.effort ?? "off";
+      const nextReasoningFallback = reasoning?.fallback ?? "downgrade";
+      setReasoningEffort(nextReasoningEffort);
+      setReasoningFallback(nextReasoningFallback);
+      setReasoningThinkingLevel(deriveLegacyThinkingLevel(nextReasoningEffort));
+      setReasoningExpert(
+        !SIMPLE_REASONING_LEVELS.has(nextReasoningEffort)
+        || nextReasoningFallback !== "downgrade",
+      );
       setDisplayName(provider.display_name || "");
       setApiKey(provider.api_key || "");
       setEnabled(provider.enabled);
@@ -254,18 +349,25 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
       syncFromProvider();
     }
     savedFormSignatureRef.current = savedFormSignature;
-  }, [draftFormSignature, provider.api_key, provider.display_name, provider.enabled, provider.id, provider.settings, savedFormSignature]);
+  }, [draftFormSignature, provider.api_key, provider.display_name, provider.enabled, provider.id, provider.settings, providerReasoningDefaults, savedFormSignature]);
+
+  useEffect(() => {
+    if (reasoningCapableModels.length === 0) {
+      if (reasoningPreviewModel !== "") setReasoningPreviewModel("");
+      return;
+    }
+    if (reasoningCapableModels.some((model) => model.id === reasoningPreviewModel)) {
+      return;
+    }
+    setReasoningPreviewModel(reasoningCapableModels[0]?.id ?? "");
+  }, [reasoningCapableModels, reasoningPreviewModel]);
 
   const quotaProviderNames = useMemo(
     () => {
       if (!isOAuth) return [];
-      const candidateNames = [
-        provider.name,
-        ...(canEditPoolRouting ? poolRouting.extra_provider_names ?? [] : []),
-      ];
       return Array.from(
         new Set(
-          candidateNames.filter((providerName) => {
+          selectedPoolProviderNames.filter((providerName) => {
             if (!providerName) return false;
             const item = providerByName.get(providerName);
             return (
@@ -276,11 +378,9 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
       );
     },
     [
-      canEditPoolRouting,
       isOAuth,
-      poolRouting.extra_provider_names,
-      provider.name,
       providerByName,
+      selectedPoolProviderNames,
       statusByName,
     ],
   );
@@ -291,7 +391,7 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
   } = useChatGPTOAuthProviderQuotas(quotaProviderNames, isOAuth);
   const poolEntries = useMemo<CodexPoolEntry[]>(() => {
     if (!canEditPoolRouting) return [];
-    return quotaProviderNames.map((providerName) => {
+    return selectedPoolProviderNames.map((providerName) => {
       const item = providerByName.get(providerName);
       return {
         name: providerName,
@@ -311,10 +411,10 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
         quota: quotaByName.get(providerName),
       };
     });
-  }, [canEditPoolRouting, provider.name, providerByName, quotaByName, quotaProviderNames, statusByName]);
+  }, [canEditPoolRouting, provider.name, providerByName, quotaByName, selectedPoolProviderNames, statusByName]);
 
   // Provider-scoped pool activity (only for pool owners)
-  const isPoolOwner = canEditPoolRouting && poolEntries.length > 0;
+  const isPoolOwner = canEditPoolRouting && selectedPoolProviderNames.length > 1;
   const {
     data: poolActivity,
     isFetching: poolActivityFetching,
@@ -322,7 +422,7 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
   } = useProviderCodexPoolActivity(provider.id, 8, isPoolOwner);
 
   const { verifyEmbedding, embVerifying, embResult, resetEmb } = useProviderVerify();
-  useEffect(() => { resetEmb(); }, [embModel, embDimensions, resetEmb]);
+  useEffect(() => { resetEmb(); }, [embModel, resetEmb]);
 
   const [saving, setSaving] = useState(false);
 
@@ -332,8 +432,6 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
       const nextDisplayName = displayName.trim();
       const nextEmbModel = embModel.trim();
       const nextEmbAPIBase = embApiBase.trim();
-      const parsedDims = embDimensions ? parseInt(embDimensions, 10) : 0;
-      const nextEmbDimensions = parsedDims > 0 ? String(parsedDims) : "";
       const submittedAPIKey = showApiKey && apiKey && apiKey !== "***" ? apiKey : "";
       const data: ProviderInput = {
         name: provider.name,
@@ -354,7 +452,6 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
                 enabled: true,
                 model: nextEmbModel || undefined,
                 api_base: nextEmbAPIBase || undefined,
-                dimensions: parsedDims > 0 ? parsedDims : undefined,
               }
             : { enabled: false },
         };
@@ -365,13 +462,21 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
           poolRouting,
         );
       }
+      nextSettings = buildProviderSettingsWithReasoningDefaults(
+        nextSettings,
+        showReasoningDefaults
+          ? {
+              effort: reasoningExpert ? reasoningEffort : reasoningThinkingLevel,
+              fallback: reasoningExpert ? reasoningFallback : "downgrade",
+            }
+          : null,
+      );
       data.settings = nextSettings;
 
       await onUpdate(provider.id, data);
       setDisplayName(nextDisplayName);
       setEmbModel(nextEmbModel);
       setEmbApiBase(nextEmbAPIBase);
-      setEmbDimensions(nextEmbDimensions);
       if (submittedAPIKey) {
         setApiKey("***");
       }
@@ -388,8 +493,7 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
   };
 
   const handleVerifyEmbedding = () => {
-    const parsedDims = embDimensions ? parseInt(embDimensions, 10) : 0;
-    verifyEmbedding(provider.id, embModel.trim() || undefined, parsedDims > 0 ? parsedDims : undefined);
+    verifyEmbedding(provider.id, embModel.trim() || undefined, undefined);
   };
 
   const displayNameDirty = displayName !== (provider.display_name || "");
@@ -400,13 +504,13 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
   const embeddingDirty =
     embEnabled !== (initEmb?.enabled ?? false)
     || embModel !== (initEmb?.model ?? "")
-    || embApiBase !== (initEmb?.api_base ?? "")
-    || embDimensions !== (initEmb?.dimensions ? String(initEmb.dimensions) : "");
+    || embApiBase !== (initEmb?.api_base ?? "");
   const routingDirty = isOAuth && routingSignature(poolRouting) !== routingSignature({
     strategy: initialRouting?.strategy ?? "primary_first",
     extra_provider_names: initialRouting?.extraProviderNames ?? [],
   });
-  const isDirty = displayNameDirty || enabledDirty || apiKeyDirty || embeddingDirty || routingDirty;
+  const reasoningDirty = draftReasoningSignature !== savedReasoningSignature;
+  const isDirty = displayNameDirty || enabledDirty || apiKeyDirty || embeddingDirty || routingDirty || reasoningDirty;
 
   return (
     <div className="space-y-4">
@@ -456,6 +560,156 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
           quota={quotaByName.get(provider.name)}
           quotaLoading={quotasLoading || quotasFetching}
         />
+      ) : null}
+
+      {showReasoningDefaults ? (
+        <section className="space-y-4 rounded-lg border p-3 sm:p-4 overflow-hidden">
+          <div className="space-y-1">
+            <h3 className="text-sm font-medium">{t("detail.reasoningDefaultsTitle")}</h3>
+            <p className="text-xs text-muted-foreground">
+              {t("detail.reasoningDefaultsDescription")}
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label>{t("detail.reasoningPreset")}</Label>
+            <Select
+              value={reasoningThinkingLevel}
+              onValueChange={(value) => {
+                setReasoningThinkingLevel(value);
+                setReasoningEffort(value);
+              }}
+            >
+              <SelectTrigger className="w-full sm:w-56">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(["off", "low", "medium", "high"] as const).map((level) => (
+                  <SelectItem key={level} value={level}>
+                    <span>{t(`reasoning.${level}`)}</span>
+                    <span className="ml-2 text-xs text-muted-foreground">
+                      {t(`reasoning.${level}Desc`)}
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+
+          <div className="rounded-md border p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">{t("detail.reasoningExpertMode")}</p>
+                <p className="text-xs text-muted-foreground">
+                  {t("detail.reasoningExpertModeDesc")}
+                </p>
+              </div>
+              <Switch
+                checked={reasoningExpert}
+                onCheckedChange={(enabled) => {
+                  setReasoningExpert(enabled);
+                  if (!enabled) {
+                    const legacy = deriveLegacyThinkingLevel(reasoningEffort);
+                    setReasoningThinkingLevel(legacy);
+                    setReasoningFallback("downgrade");
+                  } else if (reasoningEffort === "off" && reasoningThinkingLevel !== "off") {
+                    setReasoningEffort(reasoningThinkingLevel);
+                  }
+                }}
+              />
+            </div>
+
+            <div className="mt-3 space-y-2 text-xs text-muted-foreground">
+              {reasoningPreviewEntry ? (
+                <>
+                  <p>
+                    {t("detail.reasoningPreviewDescription", {
+                      model: reasoningPreviewEntry.name || reasoningPreviewEntry.id,
+                    })}
+                  </p>
+                  <div className="space-y-2">
+                    <Label htmlFor="reasoningPreviewModel">{t("detail.reasoningPreviewLabel")}</Label>
+                    <Select value={reasoningPreviewEntry.id} onValueChange={setReasoningPreviewModel}>
+                      <SelectTrigger id="reasoningPreviewModel" className="w-full sm:w-72">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {reasoningCapableModels.map((model) => (
+                          <SelectItem key={model.id} value={model.id}>
+                            {model.name || model.id}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {reasoningPreviewCapability?.levels?.length ? (
+                    <div className="flex flex-wrap gap-1">
+                      {reasoningPreviewCapability.levels.map((level) => (
+                        <Badge key={level} variant="outline" className="text-[10px]">
+                          {t(`reasoning.${level}`)}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
+                  {reasoningPreviewCapability?.default_effort ? (
+                    <p>
+                      {t("detail.reasoningPreviewDefault", {
+                        level: t(`reasoning.${reasoningPreviewCapability.default_effort}`),
+                      })}
+                    </p>
+                  ) : null}
+                </>
+              ) : (
+                <p>{t("detail.reasoningPreviewEmpty")}</p>
+              )}
+            </div>
+
+            {reasoningExpert ? (
+              <div className="mt-4 space-y-3 border-t pt-3">
+                <div className="space-y-2">
+                  <Label>{t("detail.reasoningRequestedEffort")}</Label>
+                  <Select value={reasoningEffort} onValueChange={setReasoningEffort}>
+                    <SelectTrigger className="w-full sm:w-72">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {ADVANCED_REASONING_LEVELS.map((effort) => (
+                        <SelectItem key={effort} value={effort}>
+                          <span>{t(`reasoning.${effort}`)}</span>
+                          <span className="ml-2 text-xs text-muted-foreground">
+                            {t(`reasoning.${effort}Desc`)}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>{t("detail.reasoningFallbackBehavior")}</Label>
+                  <Select
+                    value={reasoningFallback}
+                    onValueChange={(value) => setReasoningFallback(normalizeReasoningFallback(value))}
+                  >
+                    <SelectTrigger className="w-full sm:w-72">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {REASONING_FALLBACKS.map((fallback) => (
+                        <SelectItem key={fallback} value={fallback}>
+                          <span>{t(`reasoning.${fallback}`)}</span>
+                          <span className="ml-2 text-xs text-muted-foreground">
+                            {t(`reasoning.${fallback}Desc`)}
+                          </span>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </section>
       ) : null}
 
       {canEditPoolRouting ? (
@@ -534,16 +788,8 @@ export function ProviderOverview({ provider, onUpdate }: ProviderOverviewProps) 
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="embDimensions">{t("embedding.dimensions")}</Label>
-                <Input
-                  id="embDimensions"
-                  type="number"
-                  value={embDimensions}
-                  onChange={(e) => setEmbDimensions(e.target.value)}
-                  placeholder="1536"
-                  min={1}
-                  className="text-base md:text-sm"
-                />
+                <Label>{t("embedding.dimensions")}</Label>
+                <p className="text-sm text-muted-foreground">1536</p>
                 <p className="text-xs text-muted-foreground">{t("embedding.dimensionsHint")}</p>
               </div>
 
