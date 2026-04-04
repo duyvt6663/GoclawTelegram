@@ -39,6 +39,7 @@ type telegramInstanceConfig struct {
 	BlockReply                         *bool                                  `json:"block_reply,omitempty"`
 	ForceIPv4                          bool                                   `json:"force_ipv4,omitempty"`
 	AllowFrom                          []string                               `json:"allow_from,omitempty"`
+	DenyFrom                           []string                               `json:"deny_from,omitempty"`
 	Groups                             map[string]*config.TelegramGroupConfig `json:"groups,omitempty"`
 }
 
@@ -92,6 +93,7 @@ func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
 		Proxy:                              proxy,
 		APIServer:                          apiServer,
 		AllowFrom:                          ic.AllowFrom,
+		DenyFrom:                           ic.DenyFrom,
 		DMPolicy:                           ic.DMPolicy,
 		GroupPolicy:                        ic.GroupPolicy,
 		RequireMention:                     ic.RequireMention,

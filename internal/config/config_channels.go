@@ -29,6 +29,7 @@ type TelegramConfig struct {
 	Proxy                              string              `json:"proxy,omitempty"`
 	APIServer                          string              `json:"api_server,omitempty"` // custom Telegram Bot API server URL (e.g. "http://localhost:8081")
 	AllowFrom                          FlexibleStringSlice `json:"allow_from"`
+	DenyFrom                           FlexibleStringSlice `json:"deny_from,omitempty"`
 	DMPolicy                           string              `json:"dm_policy,omitempty"`                               // "pairing" (default), "allowlist", "open", "disabled"
 	GroupPolicy                        string              `json:"group_policy,omitempty"`                            // "open" (default), "allowlist", "disabled"
 	RequireMention                     *bool               `json:"require_mention,omitempty"`                         // require @bot mention in groups (default true)
@@ -75,6 +76,7 @@ type TelegramGroupConfig struct {
 	MentionMode                        string                          `json:"mention_mode,omitempty"`                            // override mention_mode for this group
 	ReplyToReactionMediaWithoutMention *bool                           `json:"reply_to_reaction_media_without_mention,omitempty"` // override media-triggered no-mention replies for this group
 	AllowFrom                          FlexibleStringSlice             `json:"allow_from,omitempty"`                              // override allow_from for this group
+	DenyFrom                           FlexibleStringSlice             `json:"deny_from,omitempty"`                               // additional deny rules for this group
 	Enabled                            *bool                           `json:"enabled,omitempty"`                                 // disable bot for this group (default: true)
 	Skills                             []string                        `json:"skills,omitempty"`                                  // skill whitelist (nil = all, [] = none)
 	Tools                              []string                        `json:"tools,omitempty"`                                   // tool allow list (nil = all, supports "group:xxx")
@@ -94,6 +96,7 @@ type TelegramTopicConfig struct {
 	Tools                              []string            `json:"tools,omitempty"` // tool allow list (nil = inherit, supports "group:xxx")
 	Enabled                            *bool               `json:"enabled,omitempty"`
 	AllowFrom                          FlexibleStringSlice `json:"allow_from,omitempty"`
+	DenyFrom                           FlexibleStringSlice `json:"deny_from,omitempty"`
 	SystemPrompt                       string              `json:"system_prompt,omitempty"`
 }
 

@@ -195,6 +195,7 @@
     "media_max_mb": { "label": "Max Media Size (MB)" },
     "link_preview": { "label": "Link Preview" },
     "allow_from": { "label": "Allowed Users" },
+    "deny_from": { "label": "Ignored Users", "help": "User IDs or @usernames the bot should always ignore." },
     "block_reply": { "label": "Block Reply", "help": "Deliver intermediate text during tool iterations" },
     "domain": { "label": "Domain" },
     "connection_mode": { "label": "Connection Mode", "help": "WebSocket needs no public IP — outbound connection only" },

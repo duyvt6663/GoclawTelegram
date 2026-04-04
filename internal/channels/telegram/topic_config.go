@@ -16,6 +16,7 @@ type resolvedTopicConfig struct {
 	mentionMode                        string // "strict" (default) or "yield"
 	replyToReactionMediaWithoutMention *bool
 	allowFrom                          []string
+	denyFrom                           []string
 	enabled                            *bool
 	skills                             []string // nil = inherit, non-nil = override (empty = no skills)
 	tools                              []string // nil = inherit (all tools), non-nil = override (supports "group:xxx")
@@ -32,6 +33,7 @@ func resolveTopicConfig(cfg config.TelegramConfig, chatIDStr string, topicID int
 		mentionMode:                        cfg.MentionMode,
 		replyToReactionMediaWithoutMention: cfg.ReplyToReactionMediaWithoutMention,
 		allowFrom:                          cfg.AllowFrom,
+		denyFrom:                           cfg.DenyFrom,
 	}
 
 	if cfg.Groups == nil {
@@ -78,6 +80,9 @@ func mergeGroupInto(dst *resolvedTopicConfig, src *config.TelegramGroupConfig) {
 	if len(src.AllowFrom) > 0 {
 		dst.allowFrom = src.AllowFrom
 	}
+	if len(src.DenyFrom) > 0 {
+		dst.denyFrom = appendUniqueStrings(dst.denyFrom, src.DenyFrom)
+	}
 	if src.Enabled != nil {
 		dst.enabled = src.Enabled
 	}
@@ -109,6 +114,9 @@ func mergeTopicInto(dst *resolvedTopicConfig, src *config.TelegramTopicConfig, g
 	}
 	if len(src.AllowFrom) > 0 {
 		dst.allowFrom = src.AllowFrom
+	}
+	if len(src.DenyFrom) > 0 {
+		dst.denyFrom = appendUniqueStrings(dst.denyFrom, src.DenyFrom)
 	}
 	if src.Enabled != nil {
 		dst.enabled = src.Enabled
@@ -163,4 +171,28 @@ func (r *resolvedTopicConfig) effectiveReplyToReactionMediaWithoutMention(defaul
 		return *r.replyToReactionMediaWithoutMention
 	}
 	return defaultVal
+}
+
+func appendUniqueStrings(base []string, extra []string) []string {
+	if len(extra) == 0 {
+		return base
+	}
+
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	out := make([]string, 0, len(base)+len(extra))
+	for _, item := range base {
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	for _, item := range extra {
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	return out
 }

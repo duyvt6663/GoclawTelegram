@@ -93,6 +93,7 @@ export const configSchema: Record<string, FieldDef[]> = {
     { key: "media_max_mb", label: "Max Media Size (MB)", type: "number", defaultValue: 20, help: "Default: 20 MB (cloud API). Increase when using local Bot API server." },
     { key: "link_preview", label: "Link Preview", type: "boolean", defaultValue: true },
     { key: "allow_from", label: "Allowed Users", type: "tags", help: "User IDs or @usernames, one per line or comma-separated" },
+    { key: "deny_from", label: "Ignored Users", type: "tags", help: "User IDs or @usernames the bot should always ignore" },
     { key: "block_reply", label: "Block Reply", type: "select", options: blockReplyOptions, defaultValue: "inherit", help: "Deliver intermediate text during tool iterations" },
   ],
   discord: [
@@ -169,6 +170,7 @@ export const groupOverrideSchema: FieldDef[] = [
   { key: "reply_to_reaction_media_without_mention", label: "Reply To Reaction Media Without @mention", type: "tristate" },
   { key: "enabled", label: "Enabled", type: "tristate" },
   { key: "allow_from", label: "Allowed Users", type: "tags", placeholder: "User IDs, one per line", help: "Restrict which users can interact in this group" },
+  { key: "deny_from", label: "Ignored Users", type: "tags", placeholder: "User IDs, one per line", help: "Always ignore these users in this group or topic" },
   { key: "skills", label: "Skills Filter", type: "skill-select", help: "Limit available skills for this group" },
   { key: "tools", label: "Tool Allowlist", type: "tool-select", help: "Restrict which tools the agent can use in this group" },
   { key: "system_prompt", label: "System Prompt", type: "textarea", placeholder: "Additional system prompt for this group..." },

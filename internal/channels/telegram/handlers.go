@@ -92,6 +92,13 @@ func resolveTelegramSenderInfo(message *telego.Message) *telegramSenderInfo {
 	return nil
 }
 
+func matchesTelegramSenderRules(userID, senderID string, rules []string) bool {
+	if len(rules) == 0 {
+		return false
+	}
+	return channels.SenderMatchesList(senderID, rules) || channels.SenderMatchesList(userID, rules)
+}
+
 // handleMessage processes an incoming Telegram update.
 func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	message := update.Message
@@ -164,6 +171,21 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		topicCfg = resolveTopicConfig(c.config, chatIDStr, messageThreadID)
 	}
 
+	denyFrom := c.config.DenyFrom
+	if isGroup {
+		denyFrom = topicCfg.denyFrom
+	}
+	if matchesTelegramSenderRules(userID, senderID, denyFrom) {
+		slog.Debug("telegram message ignored: sender denied",
+			"chat_id", chatID,
+			"chat_type", message.Chat.Type,
+			"user_id", userID,
+			"username", sender.username,
+			"channel", c.Name(),
+		)
+		return
+	}
+
 	// Group policy + enabled check (matching TS: groupPolicy ?? "open").
 	if isGroup {
 		// Per-topic enabled gate: if explicitly disabled, reject.
@@ -183,14 +205,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 			slog.Debug("telegram group message rejected: groups disabled", "chat_id", message.Chat.ID)
 			return
 		case "allowlist":
-			allowed := false
-			for _, a := range topicCfg.allowFrom {
-				if a == userID || a == senderID {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
+			if !matchesTelegramSenderRules(userID, senderID, topicCfg.allowFrom) {
 				slog.Debug("telegram group message rejected by allowlist",
 					"user_id", userID, "username", sender.username, "chat_id", chatID,
 				)

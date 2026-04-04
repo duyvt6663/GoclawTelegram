@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/nextlevelbuilder/goclaw/internal/config"
@@ -14,6 +15,7 @@ func TestResolveTopicConfig_Defaults(t *testing.T) {
 		GroupPolicy:    "open",
 		RequireMention: boolPtr(true),
 		AllowFrom:      []string{"user1"},
+		DenyFrom:       []string{"@kryptonite2304"},
 	}
 
 	result := resolveTopicConfig(cfg, "-100123", 0)
@@ -26,6 +28,9 @@ func TestResolveTopicConfig_Defaults(t *testing.T) {
 	}
 	if len(result.allowFrom) != 1 || result.allowFrom[0] != "user1" {
 		t.Errorf("allowFrom = %v, want [user1]", result.allowFrom)
+	}
+	if len(result.denyFrom) != 1 || result.denyFrom[0] != "@kryptonite2304" {
+		t.Errorf("denyFrom = %v, want [@kryptonite2304]", result.denyFrom)
 	}
 	if !result.isEnabled() {
 		t.Error("isEnabled() = false, want true")
@@ -278,5 +283,30 @@ func TestResolveTopicConfig_EmptySkillsOverride(t *testing.T) {
 	}
 	if len(result.skills) != 0 {
 		t.Errorf("skills = %v, want empty slice", result.skills)
+	}
+}
+
+func TestResolveTopicConfig_DenyFromAccumulatesAcrossLayers(t *testing.T) {
+	cfg := config.TelegramConfig{
+		DenyFrom: []string{"@kryptonite2304"},
+		Groups: map[string]*config.TelegramGroupConfig{
+			"*": {
+				DenyFrom: []string{"@wildcard_blocked"},
+			},
+			"-100123": {
+				DenyFrom: []string{"@group_blocked", "@kryptonite2304"},
+				Topics: map[string]*config.TelegramTopicConfig{
+					"42": {
+						DenyFrom: []string{"@topic_blocked"},
+					},
+				},
+			},
+		},
+	}
+
+	result := resolveTopicConfig(cfg, "-100123", 42)
+	want := []string{"@kryptonite2304", "@wildcard_blocked", "@group_blocked", "@topic_blocked"}
+	if !reflect.DeepEqual(result.denyFrom, want) {
+		t.Fatalf("denyFrom = %v, want %v", result.denyFrom, want)
 	}
 }

@@ -40,9 +40,9 @@ type DMPolicy string
 
 const (
 	DMPolicyPairing   DMPolicy = "pairing"   // Require pairing code
-	DMPolicyAllowlist DMPolicy = "allowlist"  // Only whitelisted senders
-	DMPolicyOpen      DMPolicy = "open"       // Accept all
-	DMPolicyDisabled  DMPolicy = "disabled"   // Reject all DMs
+	DMPolicyAllowlist DMPolicy = "allowlist" // Only whitelisted senders
+	DMPolicyOpen      DMPolicy = "open"      // Accept all
+	DMPolicyDisabled  DMPolicy = "disabled"  // Reject all DMs
 )
 
 // GroupPolicy controls how group messages are handled.
@@ -50,8 +50,8 @@ type GroupPolicy string
 
 const (
 	GroupPolicyOpen      GroupPolicy = "open"      // Accept all groups
-	GroupPolicyAllowlist GroupPolicy = "allowlist"  // Only whitelisted groups
-	GroupPolicyDisabled  GroupPolicy = "disabled"   // No group messages
+	GroupPolicyAllowlist GroupPolicy = "allowlist" // Only whitelisted groups
+	GroupPolicyDisabled  GroupPolicy = "disabled"  // No group messages
 )
 
 // Channel type constants used across channel packages and gateway wiring.
@@ -157,8 +157,8 @@ type BaseChannel struct {
 	bus              *bus.MessageBus
 	running          bool
 	allowList        []string
-	agentID          string                 // for DB instances: routes to specific agent (empty = use resolveAgentRoute)
-	tenantID         uuid.UUID              // for DB instances: tenant scope (zero = master tenant fallback)
+	agentID          string                  // for DB instances: routes to specific agent (empty = use resolveAgentRoute)
+	tenantID         uuid.UUID               // for DB instances: tenant scope (zero = master tenant fallback)
 	contactCollector *store.ContactCollector // optional: auto-collect contacts from channel messages
 }
 
@@ -218,14 +218,9 @@ func (c *BaseChannel) Bus() *bus.MessageBus { return c.bus }
 // HasAllowList returns true if an allowlist is configured (non-empty).
 func (c *BaseChannel) HasAllowList() bool { return len(c.allowList) > 0 }
 
-// IsAllowed checks if a sender is permitted by the allowlist.
-// Supports compound senderID format: "123456|username".
-// Empty allowlist means all senders are allowed.
-func (c *BaseChannel) IsAllowed(senderID string) bool {
-	if len(c.allowList) == 0 {
-		return true
-	}
-
+// SenderMatchesList checks whether senderID matches any configured sender rule.
+// Supports plain user IDs, @usernames, and compound "id|username" forms.
+func SenderMatchesList(senderID string, entries []string) bool {
 	// Extract parts from compound senderID like "123456|username"
 	idPart := senderID
 	userPart := ""
@@ -234,8 +229,7 @@ func (c *BaseChannel) IsAllowed(senderID string) bool {
 		userPart = senderID[idx+1:]
 	}
 
-	for _, allowed := range c.allowList {
-		// Strip leading "@" from allowed value for username matching
+	for _, allowed := range entries {
 		trimmed := strings.TrimPrefix(allowed, "@")
 		allowedID := trimmed
 		allowedUser := ""
@@ -244,7 +238,6 @@ func (c *BaseChannel) IsAllowed(senderID string) bool {
 			allowedUser = trimmed[idx+1:]
 		}
 
-		// Support either side using "id|username" compound form.
 		if senderID == allowed ||
 			idPart == allowed ||
 			senderID == trimmed ||
@@ -257,6 +250,17 @@ func (c *BaseChannel) IsAllowed(senderID string) bool {
 	}
 
 	return false
+}
+
+// IsAllowed checks if a sender is permitted by the allowlist.
+// Supports compound senderID format: "123456|username".
+// Empty allowlist means all senders are allowed.
+func (c *BaseChannel) IsAllowed(senderID string) bool {
+	if len(c.allowList) == 0 {
+		return true
+	}
+
+	return SenderMatchesList(senderID, c.allowList)
 }
 
 // CheckPolicy evaluates DM/Group policy for a message.

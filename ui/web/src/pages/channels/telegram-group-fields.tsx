@@ -8,6 +8,7 @@ export interface TelegramGroupConfigValues {
   reply_to_reaction_media_without_mention?: boolean;
   enabled?: boolean;
   allow_from?: string[];
+  deny_from?: string[];
   skills?: string[];
   tools?: string[];
   system_prompt?: string;
