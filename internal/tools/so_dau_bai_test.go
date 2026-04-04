@@ -12,7 +12,7 @@ import (
 
 func TestSoDauBaiManageToolRequiresLopTruong(t *testing.T) {
 	svc := sodaubai.NewService(filepath.Join(t.TempDir(), "so-dau-bai.json"))
-	tool := NewSoDauBaiManageTool(svc)
+	tool := NewSoDauBaiManageTool(svc, nil)
 
 	ctx := store.WithSenderID(context.Background(), "999|someone_else")
 	result := tool.Execute(ctx, map[string]any{
@@ -26,7 +26,7 @@ func TestSoDauBaiManageToolRequiresLopTruong(t *testing.T) {
 
 func TestSoDauBaiManageAndListTools(t *testing.T) {
 	svc := sodaubai.NewService(filepath.Join(t.TempDir(), "so-dau-bai.json"))
-	manage := NewSoDauBaiManageTool(svc)
+	manage := NewSoDauBaiManageTool(svc, nil)
 	list := NewSoDauBaiTodayTool(svc)
 
 	ctx := store.WithSenderID(context.Background(), "123|duyvt6663")
@@ -64,7 +64,7 @@ func TestSoDauBaiManageAndListTools(t *testing.T) {
 
 func TestSoDauBaiManageCannotRemoveAlwaysDeniedUser(t *testing.T) {
 	svc := sodaubai.NewService(filepath.Join(t.TempDir(), "so-dau-bai.json"))
-	manage := NewSoDauBaiManageTool(svc)
+	manage := NewSoDauBaiManageTool(svc, nil)
 	list := NewSoDauBaiTodayTool(svc)
 
 	scope := sodaubai.ScopeKey("telegram-main", "-100123", "-100123")

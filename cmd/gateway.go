@@ -266,7 +266,7 @@ func runGateway() {
 	slog.Info("heartbeat tool registered")
 
 	toolsReg.Register(tools.NewSoDauBaiTodayTool(soDauBaiSvc))
-	toolsReg.Register(tools.NewSoDauBaiManageTool(soDauBaiSvc))
+	toolsReg.Register(tools.NewSoDauBaiManageTool(soDauBaiSvc, pgStores.Contacts))
 	slog.Info("so_dau_bai tools registered")
 
 	// Session tools (list, status, history, send)
@@ -605,7 +605,18 @@ func runGateway() {
 		}
 		creator, _ := ch.(tools.SoDauBaiPollCreator)
 		return creator
-	}))
+	}, pgStores.Contacts))
+	toolsReg.Register(tools.NewCreateSoDauBaiPardonPollTool(soDauBaiSvc, soDauBaiPollSvc, func(channel string) tools.SoDauBaiPollCreator {
+		if strings.TrimSpace(channel) == "" {
+			return nil
+		}
+		ch, ok := channelMgr.GetChannel(channel)
+		if !ok {
+			return nil
+		}
+		creator, _ := ch.(tools.SoDauBaiPollCreator)
+		return creator
+	}, pgStores.Contacts))
 
 	registerConfigChannels(cfg, channelMgr, msgBus, pgStores, instanceLoader, stickerCaptureSvc, soDauBaiSvc, soDauBaiPollSvc)
 

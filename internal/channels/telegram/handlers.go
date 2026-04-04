@@ -327,6 +327,8 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		}
 	}
 
+	explicitSoDauBaiPollAction := detectExplicitSoDauBaiPollAction(message)
+
 	// Handle bot commands BEFORE enriching with reply/forward context.
 	// Command parsing (SplitN on spaces) breaks when reply context is appended with newlines,
 	// e.g. "/addwriter@bot\n\n[Replying to ...]" — the bot-username check fails.
@@ -700,6 +702,10 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	if implicitReactionMedia {
 		effectiveSystemPrompt = appendSystemPrompt(effectiveSystemPrompt, implicitReactionMediaSystemPrompt)
 		metadata["implicit_reaction_media"] = "true"
+	}
+	if explicitSoDauBaiPollAction != "" {
+		effectiveSystemPrompt = appendSystemPrompt(effectiveSystemPrompt, explicitSoDauBaiPollSystemPrompt(explicitSoDauBaiPollAction))
+		metadata["explicit_so_dau_bai_poll_action"] = explicitSoDauBaiPollAction
 	}
 	if effectiveSystemPrompt != "" {
 		metadata["topic_system_prompt"] = effectiveSystemPrompt

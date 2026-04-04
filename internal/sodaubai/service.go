@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 )
@@ -29,6 +30,7 @@ type State struct {
 type Service struct {
 	mu     sync.Mutex
 	paths  []string
+	legacy string
 	active string
 	now    func() time.Time
 	loc    *time.Location
@@ -43,8 +45,16 @@ func NewService(path string) *Service {
 	if fallback != "" && fallback != path {
 		candidates = append(candidates, fallback)
 	}
+	legacy := ""
+	if shouldUseLegacyFallback(path) {
+		legacy = legacyFallbackPath("so-dau-bai", ".json")
+		if legacy == path || legacy == fallback {
+			legacy = ""
+		}
+	}
 	return &Service{
 		paths:  candidates,
+		legacy: legacy,
 		now:    time.Now,
 		loc:    time.Local,
 		always: make(map[string][]string),
@@ -67,6 +77,34 @@ func fallbackPath(primaryPath, stem, ext string) string {
 		name = fmt.Sprintf("%s-%08x", stem, h.Sum32())
 	}
 	return filepath.Join(os.TempDir(), "goclaw", name+ext)
+}
+
+func legacyFallbackPath(stem, ext string) string {
+	stem = strings.TrimSpace(stem)
+	if stem == "" {
+		return ""
+	}
+	if ext == "" {
+		ext = ".json"
+	}
+	return filepath.Join(os.TempDir(), "goclaw", stem+ext)
+}
+
+func shouldUseLegacyFallback(primaryPath string) bool {
+	primaryPath = strings.TrimSpace(primaryPath)
+	if primaryPath == "" {
+		return false
+	}
+	cleanPrimary := filepath.Clean(primaryPath)
+	cleanTemp := filepath.Clean(os.TempDir())
+	rel, err := filepath.Rel(cleanTemp, cleanPrimary)
+	if err != nil {
+		return true
+	}
+	if rel == "." {
+		return false
+	}
+	return strings.HasPrefix(rel, "..")
 }
 
 func ScopeKey(channel, localKey, chatID string) string {
@@ -243,14 +281,14 @@ func (s *Service) MatchTodayForScope(scope, senderID, userID string) (*Entry, er
 	}
 
 	for _, entry := range s.state.Entries {
-		if channels.SenderMatchesList(senderID, []string{entry.Target}) || channels.SenderMatchesList(userID, []string{entry.Target}) {
+		if matchesTelegramishRule(senderID, entry.Target) || matchesTelegramishRule(userID, entry.Target) {
 			matched := entry
 			return &matched, nil
 		}
 	}
 
 	for _, entry := range s.alwaysEntriesLocked(scope) {
-		if channels.SenderMatchesList(senderID, []string{entry.Target}) || channels.SenderMatchesList(userID, []string{entry.Target}) {
+		if matchesTelegramishRule(senderID, entry.Target) || matchesTelegramishRule(userID, entry.Target) {
 			matched := entry
 			return &matched, nil
 		}
@@ -307,7 +345,7 @@ func (s *Service) MatchToday(senderID, userID string) (*Entry, error) {
 	}
 
 	for _, entry := range s.state.Entries {
-		if channels.SenderMatchesList(senderID, []string{entry.Target}) || channels.SenderMatchesList(userID, []string{entry.Target}) {
+		if matchesTelegramishRule(senderID, entry.Target) || matchesTelegramishRule(userID, entry.Target) {
 			matched := entry
 			return &matched, nil
 		}
@@ -320,6 +358,9 @@ func (s *Service) ensureLoadedLocked() error {
 		return nil
 	}
 	s.loaded = true
+	if s.active == "" && len(s.paths) > 0 {
+		s.active = s.paths[0]
+	}
 
 	for _, path := range s.paths {
 		data, err := os.ReadFile(path)
@@ -343,12 +384,17 @@ func (s *Service) ensureLoadedLocked() error {
 		if err := json.Unmarshal(data, &s.state); err != nil {
 			return fmt.Errorf("decode so_dau_bai state: %w", err)
 		}
-		return nil
+		break
+	}
+	if s.state.Date == "" && len(s.state.Entries) == 0 {
+		s.state = State{}
 	}
 
-	s.state = State{}
-	if s.active == "" && len(s.paths) > 0 {
-		s.active = s.paths[0]
+	if legacy, ok := s.loadLegacyLocked(); ok {
+		if merged, changed := mergeStateWithLegacy(s.state, legacy); changed {
+			s.state = merged
+			_ = s.saveLocked()
+		}
 	}
 	return nil
 }
@@ -407,7 +453,7 @@ func sameRule(a, b string) bool {
 	if a == "" || b == "" {
 		return false
 	}
-	return channels.SenderMatchesList(a, []string{b}) || channels.SenderMatchesList(b, []string{a})
+	return matchesTelegramishRule(a, b) || matchesTelegramishRule(b, a)
 }
 
 func cloneState(in State) State {
@@ -506,4 +552,138 @@ func uniqueRules(rules []string) []string {
 		out = append(out, rule)
 	}
 	return out
+}
+
+func (s *Service) loadLegacyLocked() (State, bool) {
+	if strings.TrimSpace(s.legacy) == "" {
+		return State{}, false
+	}
+	data, err := os.ReadFile(s.legacy)
+	if err != nil || len(data) == 0 {
+		return State{}, false
+	}
+	var legacy State
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return State{}, false
+	}
+	return legacy, true
+}
+
+func mergeStateWithLegacy(current, legacy State) (State, bool) {
+	if legacy.Date == "" && len(legacy.Entries) == 0 {
+		return cloneState(current), false
+	}
+	if current.Date == "" && len(current.Entries) == 0 {
+		return cloneState(legacy), true
+	}
+	if current.Date < legacy.Date {
+		return cloneState(legacy), true
+	}
+	if current.Date > legacy.Date {
+		return cloneState(current), false
+	}
+
+	merged := cloneState(current)
+	changed := false
+	for _, legacyEntry := range legacy.Entries {
+		if strings.TrimSpace(legacyEntry.Target) == "" {
+			continue
+		}
+		found := false
+		for _, existing := range merged.Entries {
+			if sameRule(existing.Target, legacyEntry.Target) {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+		merged.Entries = append(merged.Entries, legacyEntry)
+		changed = true
+	}
+	return merged, changed
+}
+
+func matchesTelegramishRule(senderID, rule string) bool {
+	senderID = strings.TrimSpace(senderID)
+	rule = strings.TrimSpace(rule)
+	if senderID == "" || rule == "" {
+		return false
+	}
+	if channels.SenderMatchesList(senderID, []string{rule}) {
+		return true
+	}
+
+	senderNames := usernameCandidates(senderID)
+	ruleNames := usernameCandidates(rule)
+	if len(senderNames) == 0 || len(ruleNames) == 0 {
+		return false
+	}
+	for _, senderName := range senderNames {
+		for _, ruleName := range ruleNames {
+			if senderName == ruleName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func usernameCandidates(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, 3)
+	add := func(candidate string) {
+		candidate = strings.TrimSpace(strings.TrimPrefix(candidate, "@"))
+		if candidate == "" {
+			return
+		}
+		if !looksLikeUsername(candidate) {
+			return
+		}
+		candidate = strings.ToLower(candidate)
+		if _, ok := seen[candidate]; ok {
+			return
+		}
+		seen[candidate] = struct{}{}
+	}
+
+	if idx := strings.Index(value, "|"); idx > 0 && idx+1 < len(value) {
+		add(value[idx+1:])
+	}
+	if strings.HasPrefix(value, "@") {
+		add(value)
+	}
+	add(value)
+
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for candidate := range seen {
+		out = append(out, candidate)
+	}
+	return out
+}
+
+func looksLikeUsername(value string) bool {
+	value = strings.TrimSpace(strings.TrimPrefix(value, "@"))
+	if value == "" || strings.HasPrefix(value, "sender_chat:") || strings.ContainsAny(value, " \t\n|") {
+		return false
+	}
+	hasLetter := false
+	for _, r := range value {
+		switch {
+		case unicode.IsLetter(r) || r == '_':
+			hasLetter = true
+		case unicode.IsDigit(r):
+		default:
+			return false
+		}
+	}
+	return hasLetter
 }

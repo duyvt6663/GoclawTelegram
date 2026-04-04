@@ -345,11 +345,8 @@ func processNormalMessage(
 	}
 
 	// Schedule through main lane (per-session concurrency controlled by maxConcurrent)
-	toolChoice := ""
-	reactionMediaMode := msg.Metadata["implicit_reaction_media"] == "true"
-	if reactionMediaMode {
-		toolChoice = "required"
-	}
+	toolChoice := selectToolChoice(msg.Metadata)
+	reactionMediaMode := msg.Metadata[implicitReactionMediaMetadata] == "true"
 	outCh := deps.Sched.ScheduleWithOpts(schedCtx, "main", agent.RunRequest{
 		SessionKey:        sessionKey,
 		Message:           msg.Content,

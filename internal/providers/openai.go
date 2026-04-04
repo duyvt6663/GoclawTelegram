@@ -363,7 +363,16 @@ func (p *OpenAIProvider) buildRequestBody(model string, req ChatRequest, stream 
 		if v, ok := req.Options[OptToolChoice].(string); ok && strings.TrimSpace(v) != "" {
 			toolChoice = strings.TrimSpace(v)
 		}
-		body["tool_choice"] = toolChoice
+		if fnName, ok := strings.CutPrefix(toolChoice, "function:"); ok && strings.TrimSpace(fnName) != "" {
+			body["tool_choice"] = map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name": strings.TrimSpace(fnName),
+				},
+			}
+		} else {
+			body["tool_choice"] = toolChoice
+		}
 	}
 
 	if stream {

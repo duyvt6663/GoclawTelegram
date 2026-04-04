@@ -133,3 +133,35 @@ func TestImplicitReactionMediaSystemPromptPrefersMedia(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectExplicitSoDauBaiPollActionRemove(t *testing.T) {
+	msg := &telego.Message{
+		Text: "@my_foxy_lady_bot mở poll thả Phú Lỉn đi e",
+	}
+	if got := detectExplicitSoDauBaiPollAction(msg); got != "remove" {
+		t.Fatalf("detectExplicitSoDauBaiPollAction(remove) = %q, want remove", got)
+	}
+}
+
+func TestDetectExplicitSoDauBaiPollActionAdd(t *testing.T) {
+	msg := &telego.Message{
+		Text: "Mở combat add Phú Lỉnh vào sổ @my_foxy_lady_bot",
+	}
+	if got := detectExplicitSoDauBaiPollAction(msg); got != "add" {
+		t.Fatalf("detectExplicitSoDauBaiPollAction(add) = %q, want add", got)
+	}
+}
+
+func TestExplicitSoDauBaiPollSystemPromptRemove(t *testing.T) {
+	prompt := explicitSoDauBaiPollSystemPrompt("remove")
+	wantContains := []string{
+		"`create_so_dau_bai_pardon_poll`",
+		"Opposite-action polls may coexist",
+		"Do not replace it with sticker, GIF, or meme reactions",
+	}
+	for _, want := range wantContains {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected %q in explicitSoDauBaiPollSystemPrompt(remove)", want)
+		}
+	}
+}

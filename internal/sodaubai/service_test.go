@@ -1,6 +1,8 @@
 package sodaubai
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -9,6 +11,7 @@ import (
 func TestServiceResetsWhenDayChanges(t *testing.T) {
 	svc := NewService(filepath.Join(t.TempDir(), "so-dau-bai.json"))
 	svc.paths = []string{filepath.Join(t.TempDir(), "isolated-so-dau-bai.json")}
+	svc.legacy = ""
 	loc := time.FixedZone("UTC+7", 7*60*60)
 	svc.loc = loc
 	svc.now = func() time.Time {
@@ -56,6 +59,7 @@ func TestServiceResetsWhenDayChanges(t *testing.T) {
 func TestServiceMatchAndRemoveToday(t *testing.T) {
 	svc := NewService(filepath.Join(t.TempDir(), "so-dau-bai.json"))
 	svc.paths = []string{filepath.Join(t.TempDir(), "isolated-so-dau-bai.json")}
+	svc.legacy = ""
 	loc := time.FixedZone("UTC+7", 7*60*60)
 	svc.loc = loc
 	svc.now = func() time.Time {
@@ -94,6 +98,7 @@ func TestServiceMatchAndRemoveToday(t *testing.T) {
 func TestServiceScopeAlwaysRulesAreIncludedAndPersistAcrossDayRollover(t *testing.T) {
 	svc := NewService(filepath.Join(t.TempDir(), "so-dau-bai.json"))
 	svc.paths = []string{filepath.Join(t.TempDir(), "isolated-so-dau-bai.json")}
+	svc.legacy = ""
 	loc := time.FixedZone("UTC+7", 7*60*60)
 	svc.loc = loc
 	svc.now = func() time.Time {
@@ -132,5 +137,85 @@ func TestServiceScopeAlwaysRulesAreIncludedAndPersistAcrossDayRollover(t *testin
 	}
 	if len(state.Entries) != 2 {
 		t.Fatalf("TodayForScope().Entries after rollover = %v, want always entries preserved", state.Entries)
+	}
+}
+
+func TestServiceLoadsLegacyFallbackEntriesIntoCurrentStore(t *testing.T) {
+	dir := t.TempDir()
+	currentPath := filepath.Join(dir, "hashed-so-dau-bai.json")
+	legacyPath := filepath.Join(dir, "legacy-so-dau-bai.json")
+
+	loc := time.FixedZone("UTC+7", 7*60*60)
+	now := time.Date(2026, time.April, 4, 17, 0, 0, 0, loc)
+
+	writeState := func(path string, state State) {
+		t.Helper()
+		data, err := json.Marshal(state)
+		if err != nil {
+			t.Fatalf("Marshal(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+
+	writeState(currentPath, State{
+		Date:    "2026-04-04",
+		Entries: nil,
+	})
+	writeState(legacyPath, State{
+		Date: "2026-04-04",
+		Entries: []Entry{
+			{Target: "@Phamhphu", AddedBy: "@duyvt6663", AddedDay: "2026-04-04"},
+		},
+	})
+
+	svc := NewService(filepath.Join(dir, "primary-so-dau-bai.json"))
+	svc.paths = []string{filepath.Join(dir, "missing-primary.json"), currentPath}
+	svc.legacy = legacyPath
+	svc.loc = loc
+	svc.now = func() time.Time { return now }
+
+	match, err := svc.MatchToday("123|phamhphu", "123")
+	if err != nil {
+		t.Fatalf("MatchToday() error = %v", err)
+	}
+	if match == nil || match.Target != "@Phamhphu" {
+		t.Fatalf("MatchToday() = %+v, want @Phamhphu from legacy state", match)
+	}
+
+	data, err := os.ReadFile(currentPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", currentPath, err)
+	}
+	var migrated State
+	if err := json.Unmarshal(data, &migrated); err != nil {
+		t.Fatalf("Unmarshal(%s): %v", currentPath, err)
+	}
+	if len(migrated.Entries) != 1 || migrated.Entries[0].Target != "@Phamhphu" {
+		t.Fatalf("migrated state = %+v, want @Phamhphu persisted to current store", migrated)
+	}
+}
+
+func TestServiceMatchTodayIgnoresTelegramUsernameCase(t *testing.T) {
+	svc := NewService(filepath.Join(t.TempDir(), "so-dau-bai.json"))
+	svc.paths = []string{filepath.Join(t.TempDir(), "isolated-so-dau-bai.json")}
+	svc.legacy = ""
+	loc := time.FixedZone("UTC+7", 7*60*60)
+	svc.loc = loc
+	svc.now = func() time.Time {
+		return time.Date(2026, time.April, 4, 12, 0, 0, 0, loc)
+	}
+
+	if _, _, err := svc.AddToday("@Phamhphu", "@duyvt6663", ""); err != nil {
+		t.Fatalf("AddToday() error = %v", err)
+	}
+
+	match, err := svc.MatchToday("999|phamhphu", "999")
+	if err != nil {
+		t.Fatalf("MatchToday() error = %v", err)
+	}
+	if match == nil || match.Target != "@Phamhphu" {
+		t.Fatalf("MatchToday() = %+v, want case-insensitive match for @Phamhphu", match)
 	}
 }

@@ -366,14 +366,15 @@ var toolStatusMap = map[string]string{
 	// Runtime
 	"exec": "⚡ Running code...",
 	// Web
-	"web_search":                  "🔍 Searching the web...",
-	"web_fetch":                   "🔍 Fetching web content...",
-	"find_and_post_meme":          "🖼 Finding an online meme image...",
-	"find_and_post_local_meme":    "🎬 Picking a local meme GIF/video...",
-	"find_and_post_local_sticker": "🧷 Picking a saved sticker...",
-	"so_dau_bai_today":            "📒 Checking today's sổ đầu bài...",
-	"so_dau_bai_manage":           "📒 Updating today's sổ đầu bài...",
-	"create_so_dau_bai_poll":      "🗳️ Opening a sổ đầu bài vote...",
+	"web_search":                    "🔍 Searching the web...",
+	"web_fetch":                     "🔍 Fetching web content...",
+	"find_and_post_meme":            "🖼 Finding an online meme image...",
+	"find_and_post_local_meme":      "🎬 Picking a local meme GIF/video...",
+	"find_and_post_local_sticker":   "🧷 Picking a saved sticker...",
+	"so_dau_bai_today":              "📒 Checking today's sổ đầu bài...",
+	"so_dau_bai_manage":             "📒 Updating today's sổ đầu bài...",
+	"create_so_dau_bai_poll":        "🗳️ Opening a sổ đầu bài vote...",
+	"create_so_dau_bai_pardon_poll": "🗳️ Opening a sổ đầu bài pardon vote...",
 	// Memory
 	"memory_search":          "🧠 Searching memory...",
 	"memory_get":             "🧠 Retrieving memory...",

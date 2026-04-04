@@ -51,11 +51,12 @@ func (t *SoDauBaiTodayTool) Execute(ctx context.Context, _ map[string]any) *Resu
 }
 
 type SoDauBaiManageTool struct {
-	service *sodaubai.Service
+	service  *sodaubai.Service
+	contacts store.ContactStore
 }
 
-func NewSoDauBaiManageTool(service *sodaubai.Service) *SoDauBaiManageTool {
-	return &SoDauBaiManageTool{service: service}
+func NewSoDauBaiManageTool(service *sodaubai.Service, contacts store.ContactStore) *SoDauBaiManageTool {
+	return &SoDauBaiManageTool{service: service, contacts: contacts}
 }
 
 func (t *SoDauBaiManageTool) Name() string { return soDauBaiManageToolName }
@@ -77,7 +78,7 @@ func (t *SoDauBaiManageTool) Parameters() map[string]any {
 			},
 			"target": map[string]any{
 				"type":        "string",
-				"description": "Telegram target to update. Use @username, numeric user ID, or a raw sender form like 123456|username.",
+				"description": "Telegram target to update. Use @username, numeric user ID, a raw sender form like 123456|username, or a known display name/nickname from this Telegram chat.",
 			},
 			"note": map[string]any{
 				"type":        "string",
@@ -105,6 +106,7 @@ func (t *SoDauBaiManageTool) Execute(ctx context.Context, args map[string]any) *
 	if target == "" {
 		return ErrorResult("target is required")
 	}
+	target = resolveTelegramTarget(ctx, t.contacts, target)
 
 	sender := prettyTelegramSender(store.SenderIDFromContext(ctx))
 	scope := soDauBaiScopeFromCtx(ctx)

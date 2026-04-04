@@ -20,6 +20,7 @@ func TestBuildSystemPrompt_TelegramReactionMediaHint(t *testing.T) {
 		"Prefer this order when it fits: `find_and_post_local_sticker` -> `find_and_post_local_meme` -> `find_and_post_meme`.",
 		"Prefer reusing learned local media over searching the web.",
 		"If the turn itself is a sticker, GIF, or meme-style reaction cue, the best reply may be a reaction item as the main response instead of text.",
+		"that moderation action takes priority over reaction media",
 		"write the query for the reaction you want to send back, not a literal description of the sticker, GIF, or meme you just received.",
 		"Translate the incoming media into a comeback or answering vibe",
 		"- find_and_post_local_sticker: Attach a previously learned Telegram sticker from saved libraries",

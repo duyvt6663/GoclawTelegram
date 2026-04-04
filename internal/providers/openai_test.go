@@ -101,3 +101,48 @@ func TestOpenAIProviderBuildRequestBodyHonorsToolChoiceOverride(t *testing.T) {
 		t.Fatalf("tool_choice = %v, want required", got)
 	}
 }
+
+func TestOpenAIProviderBuildRequestBodyHonorsSpecificFunctionToolChoice(t *testing.T) {
+	p := NewOpenAIProvider("openai", "test-key", "https://api.openai.com/v1", "gpt-4o")
+
+	req := ChatRequest{
+		Messages: []Message{{Role: "user", Content: "Open the pardon vote"}},
+		Tools: []ToolDefinition{
+			{
+				Type: "function",
+				Function: ToolFunctionSchema{
+					Name:        "create_so_dau_bai_pardon_poll",
+					Description: "Open a pardon poll",
+					Parameters:  map[string]any{"type": "object"},
+				},
+			},
+			{
+				Type: "function",
+				Function: ToolFunctionSchema{
+					Name:        "find_and_post_local_sticker",
+					Description: "Attach a saved sticker",
+					Parameters:  map[string]any{"type": "object"},
+				},
+			},
+		},
+		Options: map[string]any{
+			OptToolChoice: "function:create_so_dau_bai_pardon_poll",
+		},
+	}
+
+	body := p.buildRequestBody("gpt-4o", req, false)
+	got, ok := body["tool_choice"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_choice = %T %v, want function object", body["tool_choice"], body["tool_choice"])
+	}
+	if got["type"] != "function" {
+		t.Fatalf("tool_choice.type = %v, want function", got["type"])
+	}
+	fn, ok := got["function"].(map[string]any)
+	if !ok {
+		t.Fatalf("tool_choice.function = %T %v, want object", got["function"], got["function"])
+	}
+	if fn["name"] != "create_so_dau_bai_pardon_poll" {
+		t.Fatalf("tool_choice.function.name = %v, want create_so_dau_bai_pardon_poll", fn["name"])
+	}
+}

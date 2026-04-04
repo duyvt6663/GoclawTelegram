@@ -10,10 +10,15 @@ import (
 	"time"
 )
 
-const DefaultPollThreshold = 5
+const (
+	DefaultPollThreshold = 5
+	PollActionAdd        = "add"
+	PollActionRemove     = "remove"
+)
 
 type PollEntry struct {
 	PollID        string   `json:"poll_id"`
+	Action        string   `json:"action,omitempty"`
 	Scope         string   `json:"scope,omitempty"`
 	Channel       string   `json:"channel,omitempty"`
 	ChatID        string   `json:"chat_id,omitempty"`
@@ -40,6 +45,7 @@ type PollState struct {
 
 type PollCreate struct {
 	PollID        string
+	Action        string
 	Scope         string
 	Channel       string
 	ChatID        string
@@ -82,8 +88,18 @@ func NewPollService(path string) *PollService {
 	}
 }
 
+func NormalizePollAction(action string) string {
+	switch strings.TrimSpace(action) {
+	case PollActionRemove:
+		return PollActionRemove
+	default:
+		return PollActionAdd
+	}
+}
+
 func (s *PollService) CreatePoll(input PollCreate) (PollEntry, error) {
 	input.PollID = strings.TrimSpace(input.PollID)
+	input.Action = NormalizePollAction(input.Action)
 	input.Scope = strings.TrimSpace(input.Scope)
 	input.Channel = strings.TrimSpace(input.Channel)
 	input.ChatID = strings.TrimSpace(input.ChatID)
@@ -118,13 +134,18 @@ func (s *PollService) CreatePoll(input PollCreate) (PollEntry, error) {
 		if entry.PollID == input.PollID {
 			return entry, nil
 		}
-		if entry.Scope == input.Scope && !entry.Resolved && !entry.Closed && sameRule(entry.Target, input.Target) {
+		if !entry.Resolved &&
+			!entry.Closed &&
+			sameRule(entry.Target, input.Target) &&
+			NormalizePollAction(entry.Action) == input.Action &&
+			samePollReuseScope(entry, input) {
 			return PollEntry{}, fmt.Errorf("%s already has an active sổ đầu bài poll in this chat", entry.Target)
 		}
 	}
 
 	entry := PollEntry{
 		PollID:        input.PollID,
+		Action:        input.Action,
 		Scope:         input.Scope,
 		Channel:       input.Channel,
 		ChatID:        input.ChatID,
@@ -147,10 +168,57 @@ func (s *PollService) CreatePoll(input PollCreate) (PollEntry, error) {
 }
 
 func (s *PollService) FindActiveByTarget(scope, target string) (*PollEntry, error) {
+	return s.FindActiveByTargetAction(scope, target, "")
+}
+
+func (s *PollService) FindActiveByChatTargetAction(channel, chatID, target, action string) (*PollEntry, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return nil, nil
 	}
+	channel = strings.TrimSpace(channel)
+	chatID = strings.TrimSpace(chatID)
+	action = strings.TrimSpace(action)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.ensureLoadedLocked(); err != nil {
+		return nil, err
+	}
+	if dirty := s.ensureTodayLocked(); dirty {
+		if err := s.saveLocked(); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, entry := range s.state.Polls {
+		if entry.Resolved || entry.Closed {
+			continue
+		}
+		if action != "" && NormalizePollAction(entry.Action) != NormalizePollAction(action) {
+			continue
+		}
+		if channel != "" && strings.TrimSpace(entry.Channel) != channel {
+			continue
+		}
+		if chatID != "" && strings.TrimSpace(entry.ChatID) != chatID {
+			continue
+		}
+		if sameRule(entry.Target, target) {
+			matched := clonePollEntry(entry)
+			return &matched, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *PollService) FindActiveByTargetAction(scope, target, action string) (*PollEntry, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, nil
+	}
+	action = strings.TrimSpace(action)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -168,12 +236,26 @@ func (s *PollService) FindActiveByTarget(scope, target string) (*PollEntry, erro
 		if entry.Scope != strings.TrimSpace(scope) || entry.Resolved || entry.Closed {
 			continue
 		}
+		if action != "" && NormalizePollAction(entry.Action) != NormalizePollAction(action) {
+			continue
+		}
 		if sameRule(entry.Target, target) {
 			matched := clonePollEntry(entry)
 			return &matched, nil
 		}
 	}
 	return nil, nil
+}
+
+func samePollReuseScope(entry PollEntry, input PollCreate) bool {
+	if strings.TrimSpace(entry.Channel) != "" &&
+		strings.TrimSpace(input.Channel) != "" &&
+		strings.TrimSpace(entry.ChatID) != "" &&
+		strings.TrimSpace(input.ChatID) != "" {
+		return strings.TrimSpace(entry.Channel) == strings.TrimSpace(input.Channel) &&
+			strings.TrimSpace(entry.ChatID) == strings.TrimSpace(input.ChatID)
+	}
+	return entry.Scope == input.Scope
 }
 
 func (s *PollService) RecordVote(pollID, voterID string, optionIDs []int) (PollVoteResult, error) {

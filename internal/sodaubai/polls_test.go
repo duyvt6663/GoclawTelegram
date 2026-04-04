@@ -17,6 +17,7 @@ func TestPollServiceThresholdAndDayReset(t *testing.T) {
 
 	entry, err := svc.CreatePoll(PollCreate{
 		PollID:        "poll-1",
+		Action:        PollActionAdd,
 		Scope:         ScopeKey("telegram-main", "-100123", "-100123"),
 		Channel:       "telegram-main",
 		ChatID:        "-100123",
@@ -31,7 +32,7 @@ func TestPollServiceThresholdAndDayReset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreatePoll() error = %v", err)
 	}
-	if entry.PollID != "poll-1" || entry.Threshold != 5 {
+	if entry.PollID != "poll-1" || entry.Threshold != 5 || entry.Action != PollActionAdd {
 		t.Fatalf("CreatePoll() = %+v", entry)
 	}
 
@@ -78,6 +79,7 @@ func TestPollServiceVoteChangeAndClose(t *testing.T) {
 	scope := ScopeKey("telegram-main", "-100123:topic:9", "-100123")
 	if _, err := svc.CreatePoll(PollCreate{
 		PollID:    "poll-2",
+		Action:    PollActionRemove,
 		Scope:     scope,
 		Channel:   "telegram-main",
 		ChatID:    "-100123",
@@ -85,10 +87,18 @@ func TestPollServiceVoteChangeAndClose(t *testing.T) {
 		ThreadID:  9,
 		MessageID: 99,
 		Target:    "@alice",
-		Question:  "Cho @alice vào sổ đầu bài hôm nay không?",
+		Question:  "Cho @alice ra khỏi sổ đầu bài hôm nay không?",
 		Threshold: 5,
 	}); err != nil {
 		t.Fatalf("CreatePoll() error = %v", err)
+	}
+
+	active, err := svc.FindActiveByTarget(scope, "@alice")
+	if err != nil {
+		t.Fatalf("FindActiveByTarget() error = %v", err)
+	}
+	if active == nil || active.Action != PollActionRemove {
+		t.Fatalf("FindActiveByTarget() = %+v, want remove-action poll", active)
 	}
 
 	if _, err := svc.RecordVote("poll-2", "11", []int{0}); err != nil {
@@ -108,6 +118,119 @@ func TestPollServiceVoteChangeAndClose(t *testing.T) {
 	}
 	if closed == nil || !closed.Closed {
 		t.Fatalf("MarkClosed() = %+v, want closed poll", closed)
+	}
+}
+
+func TestPollServiceAllowsOppositeActionPollsForSameTarget(t *testing.T) {
+	svc := NewPollService(filepath.Join(t.TempDir(), "so-dau-bai-polls.json"))
+	svc.paths = []string{filepath.Join(t.TempDir(), "isolated-so-dau-bai-polls.json")}
+	loc := time.FixedZone("UTC+7", 7*60*60)
+	svc.loc = loc
+	svc.now = func() time.Time {
+		return time.Date(2026, time.April, 4, 17, 0, 0, 0, loc)
+	}
+
+	scope := ScopeKey("telegram-main", "-100123:topic:1", "-100123")
+	if _, err := svc.CreatePoll(PollCreate{
+		PollID:        "poll-add",
+		Action:        PollActionAdd,
+		Scope:         scope,
+		Channel:       "telegram-main",
+		ChatID:        "-100123",
+		LocalKey:      "-100123:topic:1",
+		ThreadID:      1,
+		MessageID:     100,
+		Target:        "@alice",
+		TargetDisplay: "@alice",
+		Question:      "Cho @alice vào sổ đầu bài không?",
+		Threshold:     5,
+	}); err != nil {
+		t.Fatalf("CreatePoll(add) error = %v", err)
+	}
+
+	if _, err := svc.CreatePoll(PollCreate{
+		PollID:        "poll-remove",
+		Action:        PollActionRemove,
+		Scope:         scope,
+		Channel:       "telegram-main",
+		ChatID:        "-100123",
+		LocalKey:      "-100123:topic:1",
+		ThreadID:      1,
+		MessageID:     101,
+		Target:        "@alice",
+		TargetDisplay: "@alice",
+		Question:      "Tha @alice khỏi sổ đầu bài không?",
+		Threshold:     5,
+	}); err != nil {
+		t.Fatalf("CreatePoll(remove) error = %v", err)
+	}
+
+	activeAdd, err := svc.FindActiveByTargetAction(scope, "@alice", PollActionAdd)
+	if err != nil {
+		t.Fatalf("FindActiveByTargetAction(add) error = %v", err)
+	}
+	if activeAdd == nil || activeAdd.PollID != "poll-add" {
+		t.Fatalf("FindActiveByTargetAction(add) = %+v, want poll-add", activeAdd)
+	}
+
+	activeRemove, err := svc.FindActiveByTargetAction(scope, "@alice", PollActionRemove)
+	if err != nil {
+		t.Fatalf("FindActiveByTargetAction(remove) error = %v", err)
+	}
+	if activeRemove == nil || activeRemove.PollID != "poll-remove" {
+		t.Fatalf("FindActiveByTargetAction(remove) = %+v, want poll-remove", activeRemove)
+	}
+}
+
+func TestPollServiceReusesSameActionPollAcrossTopicsInSameChat(t *testing.T) {
+	svc := NewPollService(filepath.Join(t.TempDir(), "so-dau-bai-polls.json"))
+	svc.paths = []string{filepath.Join(t.TempDir(), "isolated-so-dau-bai-polls.json")}
+	loc := time.FixedZone("UTC+7", 7*60*60)
+	svc.loc = loc
+	svc.now = func() time.Time {
+		return time.Date(2026, time.April, 4, 18, 0, 0, 0, loc)
+	}
+
+	if _, err := svc.CreatePoll(PollCreate{
+		PollID:        "poll-topic-9",
+		Action:        PollActionRemove,
+		Scope:         ScopeKey("telegram-main", "-100123:topic:9", "-100123"),
+		Channel:       "telegram-main",
+		ChatID:        "-100123",
+		LocalKey:      "-100123:topic:9",
+		ThreadID:      9,
+		MessageID:     200,
+		Target:        "@alice",
+		TargetDisplay: "@alice",
+		Question:      "Tha @alice khỏi sổ đầu bài không?",
+		Threshold:     5,
+	}); err != nil {
+		t.Fatalf("CreatePoll(topic 9) error = %v", err)
+	}
+
+	active, err := svc.FindActiveByChatTargetAction("telegram-main", "-100123", "@alice", PollActionRemove)
+	if err != nil {
+		t.Fatalf("FindActiveByChatTargetAction() error = %v", err)
+	}
+	if active == nil || active.PollID != "poll-topic-9" || active.ThreadID != 9 {
+		t.Fatalf("FindActiveByChatTargetAction() = %+v, want poll-topic-9 in topic 9", active)
+	}
+
+	if _, err := svc.CreatePoll(PollCreate{
+		PollID:        "poll-topic-12",
+		Action:        PollActionRemove,
+		Scope:         ScopeKey("telegram-main", "-100123:topic:12", "-100123"),
+		Channel:       "telegram-main",
+		ChatID:        "-100123",
+		LocalKey:      "-100123:topic:12",
+		ThreadID:      12,
+		MessageID:     201,
+		Target:        "@alice",
+		TargetDisplay: "@alice",
+		Question:      "Tha @alice khỏi sổ đầu bài ở topic khác không?",
+		Threshold:     5,
+	}); err == nil {
+		t.Fatal("CreatePoll(topic 12) error = nil, want duplicate-active-poll error across chat topics")
 	}
 }
 

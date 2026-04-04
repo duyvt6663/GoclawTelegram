@@ -94,14 +94,30 @@ func (c *Channel) resolveSoDauBaiPollThreshold(ctx context.Context, result sodau
 		return
 	}
 
-	alreadyAlways := false
-	added := false
-	var addErr error
-	if c.soDauBai != nil {
-		alreadyAlways = c.soDauBai.HasAlways(entry.Scope, entry.Target)
-		if !alreadyAlways {
-			_, added, addErr = c.soDauBai.AddToday(entry.Target, soDauBaiPollAddedBy, buildSoDauBaiPollNote(entry, result.YesVotes))
+	var text string
+	switch sodaubai.NormalizePollAction(entry.Action) {
+	case sodaubai.PollActionRemove:
+		alreadyAlways := false
+		removed := false
+		var removeErr error
+		if c.soDauBai != nil {
+			alreadyAlways = c.soDauBai.HasAlways(entry.Scope, entry.Target)
+			if !alreadyAlways {
+				_, removed, removeErr = c.soDauBai.RemoveToday(entry.Target)
+			}
 		}
+		text = buildSoDauBaiPardonAnnouncement(entry, result.YesVotes, removed, alreadyAlways, removeErr)
+	default:
+		alreadyAlways := false
+		added := false
+		var addErr error
+		if c.soDauBai != nil {
+			alreadyAlways = c.soDauBai.HasAlways(entry.Scope, entry.Target)
+			if !alreadyAlways {
+				_, added, addErr = c.soDauBai.AddToday(entry.Target, soDauBaiPollAddedBy, buildSoDauBaiPollNote(entry, result.YesVotes))
+			}
+		}
+		text = buildSoDauBaiPollAnnouncement(entry, result.YesVotes, added, alreadyAlways, addErr)
 	}
 
 	if err := c.stopSoDauBaiPoll(ctx, chatID, entry.MessageID); err != nil {
@@ -111,7 +127,6 @@ func (c *Channel) resolveSoDauBaiPollThreshold(ctx context.Context, result sodau
 		slog.Warn("telegram poll close mark failed after threshold", "poll_id", entry.PollID, "error", err)
 	}
 
-	text := buildSoDauBaiPollAnnouncement(entry, result.YesVotes, added, alreadyAlways, addErr)
 	if err := c.sendSoDauBaiPollAnnouncement(ctx, chatID, entry.ThreadID, text); err != nil {
 		slog.Warn("telegram poll announcement failed", "poll_id", entry.PollID, "error", err)
 	}
@@ -182,6 +197,23 @@ func buildSoDauBaiPollAnnouncement(entry *sodaubai.PollEntry, yesVotes int, adde
 		return fmt.Sprintf("📒 %s chốt %d phiếu và đã bị nhập khẩu vào sổ đầu bài hôm nay.", target, yesVotes)
 	default:
 		return fmt.Sprintf("📒 %s đủ %d phiếu và tên đã nằm chình ình trong sổ đầu bài hôm nay rồi.", target, yesVotes)
+	}
+}
+
+func buildSoDauBaiPardonAnnouncement(entry *sodaubai.PollEntry, yesVotes int, removed, alreadyAlways bool, removeErr error) string {
+	target := pollAnnouncementTarget(entry)
+	switch {
+	case removeErr != nil:
+		return fmt.Sprintf("⚠️ %s đủ %d phiếu tha rồi mà tôi gạch sổ bị trượt tay. Sổ hôm nay chưa cập nhật được.", target, yesVotes)
+	case alreadyAlways:
+		return fmt.Sprintf("📒 %s đủ %d phiếu tha, nhưng tên này thuộc deny_from nên vẫn chưa được xóa khỏi sổ đầu bài của chat này.", target, yesVotes)
+	case removed:
+		if reason := strings.TrimSpace(entry.Reason); reason != "" {
+			return fmt.Sprintf("🧽 %s chốt %d phiếu và đã được gạch tên khỏi sổ đầu bài hôm nay.\nTình tiết giảm nhẹ: %s", target, yesVotes, reason)
+		}
+		return fmt.Sprintf("🧽 %s chốt %d phiếu và đã được gạch tên khỏi sổ đầu bài hôm nay.", target, yesVotes)
+	default:
+		return fmt.Sprintf("🧽 %s đủ %d phiếu tha, nhưng tên đã bay khỏi sổ đầu bài hôm nay từ trước rồi.", target, yesVotes)
 	}
 }
 
