@@ -35,6 +35,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
 	"github.com/nextlevelbuilder/goclaw/internal/skills"
+	"github.com/nextlevelbuilder/goclaw/internal/sodaubai"
 	"github.com/nextlevelbuilder/goclaw/internal/stickers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/store/pg"
@@ -167,6 +168,7 @@ func runGateway() {
 	if pgStores.BuiltinTools != nil {
 		stickerCaptureSvc = stickers.NewCaptureService(pgStores.BuiltinTools, providerRegistry)
 	}
+	soDauBaiSvc := sodaubai.NewService(filepath.Join(dataDir, "so-dau-bai.json"))
 	setupMemoryEmbeddings(pgStores, providerRegistry)
 	if embProvider := resolveEmbeddingProvider(pgStores.Providers, providerRegistry, pgStores.SystemConfigs); embProvider != nil {
 		if t, ok := toolsReg.Get("find_and_post_local_meme"); ok {
@@ -261,6 +263,10 @@ func runGateway() {
 	heartbeatTool.SetAgentStore(pgStores.Agents)
 	toolsReg.Register(heartbeatTool)
 	slog.Info("heartbeat tool registered")
+
+	toolsReg.Register(tools.NewSoDauBaiTodayTool(soDauBaiSvc))
+	toolsReg.Register(tools.NewSoDauBaiManageTool(soDauBaiSvc))
+	slog.Info("so_dau_bai tools registered")
 
 	// Session tools (list, status, history, send)
 	toolsReg.Register(tools.NewSessionsListTool())
@@ -575,7 +581,7 @@ func runGateway() {
 		instanceLoader = channels.NewInstanceLoader(pgStores.ChannelInstances, pgStores.Agents, channelMgr, msgBus, pgStores.Pairing)
 		instanceLoader.SetProviderRegistry(providerRegistry)
 		instanceLoader.SetPendingCompactionConfig(cfg.Channels.PendingCompaction)
-		instanceLoader.RegisterFactory(channels.TypeTelegram, telegram.FactoryWithStores(pgStores.Agents, pgStores.ConfigPermissions, pgStores.Teams, pgStores.SubagentTasks, pgStores.PendingMessages, stickerCaptureSvc))
+		instanceLoader.RegisterFactory(channels.TypeTelegram, telegram.FactoryWithStores(pgStores.Agents, pgStores.ConfigPermissions, pgStores.Teams, pgStores.SubagentTasks, pgStores.PendingMessages, stickerCaptureSvc, soDauBaiSvc))
 		instanceLoader.RegisterFactory(channels.TypeDiscord, discord.FactoryWithStores(pgStores.Agents, pgStores.ConfigPermissions, pgStores.PendingMessages))
 		instanceLoader.RegisterFactory(channels.TypeFeishu, feishu.FactoryWithPendingStore(pgStores.PendingMessages))
 		instanceLoader.RegisterFactory(channels.TypeZaloOA, zalo.Factory)
@@ -588,7 +594,7 @@ func runGateway() {
 	}
 
 	// Register config-based channels as fallback when no DB instances loaded.
-	registerConfigChannels(cfg, channelMgr, msgBus, pgStores, instanceLoader, stickerCaptureSvc)
+	registerConfigChannels(cfg, channelMgr, msgBus, pgStores, instanceLoader, stickerCaptureSvc, soDauBaiSvc)
 
 	// Register channels/instances/links/teams RPC methods
 	wireChannelRPCMethods(server, pgStores, channelMgr, agentRouter, msgBus, workspace)

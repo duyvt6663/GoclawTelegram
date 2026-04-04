@@ -14,6 +14,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/channels/typing"
+	"github.com/nextlevelbuilder/goclaw/internal/sodaubai"
 	"github.com/nextlevelbuilder/goclaw/internal/stickers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -171,9 +172,42 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		topicCfg = resolveTopicConfig(c.config, chatIDStr, messageThreadID)
 	}
 
+	// Build composite localKey for sync.Map operations.
+	// Forum topics get separate state (placeholders, streams, reactions, history).
+	// TS ref: buildTelegramGroupPeerId() in src/telegram/bot/helpers.ts.
+	localKey := chatIDStr
+	if isForum && messageThreadID > 0 {
+		localKey = fmt.Sprintf("%s:topic:%d", chatIDStr, messageThreadID)
+	} else if dmThreadID > 0 {
+		localKey = fmt.Sprintf("%s:thread:%d", chatIDStr, dmThreadID)
+	}
+
 	denyFrom := c.config.DenyFrom
 	if isGroup {
 		denyFrom = topicCfg.denyFrom
+	}
+	if c.soDauBai != nil {
+		scope := sodaubai.ScopeKey(c.Name(), localKey, chatIDStr)
+		c.soDauBai.SetAlways(scope, denyFrom)
+		entry, err := c.soDauBai.MatchTodayForScope(scope, senderID, userID)
+		if err != nil {
+			slog.Warn("telegram so_dau_bai check failed",
+				"chat_id", chatID,
+				"user_id", userID,
+				"username", sender.username,
+				"error", err,
+			)
+		} else if entry != nil {
+			slog.Debug("telegram message ignored: sender on so_dau_bai",
+				"chat_id", chatID,
+				"chat_type", message.Chat.Type,
+				"user_id", userID,
+				"username", sender.username,
+				"target", entry.Target,
+				"channel", c.Name(),
+			)
+			return
+		}
 	}
 	if matchesTelegramSenderRules(userID, senderID, denyFrom) {
 		slog.Debug("telegram message ignored: sender denied",
@@ -261,16 +295,6 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 				return
 			}
 		}
-	}
-
-	// Build composite localKey for sync.Map operations.
-	// Forum topics get separate state (placeholders, streams, reactions, history).
-	// TS ref: buildTelegramGroupPeerId() in src/telegram/bot/helpers.ts.
-	localKey := chatIDStr
-	if isForum && messageThreadID > 0 {
-		localKey = fmt.Sprintf("%s:topic:%d", chatIDStr, messageThreadID)
-	} else if dmThreadID > 0 {
-		localKey = fmt.Sprintf("%s:thread:%d", chatIDStr, dmThreadID)
 	}
 
 	// Store thread ID for streaming/send use (looked up by localKey later).

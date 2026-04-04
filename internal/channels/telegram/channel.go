@@ -17,6 +17,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
+	"github.com/nextlevelbuilder/goclaw/internal/sodaubai"
 	"github.com/nextlevelbuilder/goclaw/internal/stickers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -43,6 +44,7 @@ type Channel struct {
 	approvedGroups                     sync.Map                    // chatIDStr string → true (cached group pairing approval)
 	groupHistory                       *channels.PendingHistory
 	stickerCapture                     *stickers.CaptureService
+	soDauBai                           *sodaubai.Service
 	historyLimit                       int
 	requireMention                     bool
 	mentionMode                        string // "strict" (default) or "yield"
@@ -70,7 +72,7 @@ func (c *thinkingCancel) Cancel() {
 // configPermStore is optional (nil = group file writer commands disabled).
 // teamStore is optional (nil = /tasks, /task_detail commands disabled).
 // subagentTaskStore is optional (nil = /subagents, /subagent commands disabled).
-func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, subagentTaskStore store.SubagentTaskStore, pendingStore store.PendingMessageStore, stickerCapture *stickers.CaptureService) (*Channel, error) {
+func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, subagentTaskStore store.SubagentTaskStore, pendingStore store.PendingMessageStore, stickerCapture *stickers.CaptureService, soDauBai *sodaubai.Service) (*Channel, error) {
 	var opts []telego.BotOption
 
 	if cfg.APIServer != "" {
@@ -142,6 +144,7 @@ func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.Pai
 		subagentTaskStore:                  subagentTaskStore,
 		groupHistory:                       channels.MakeHistory(channels.TypeTelegram, pendingStore, base.TenantID()),
 		stickerCapture:                     stickerCapture,
+		soDauBai:                           soDauBai,
 		historyLimit:                       historyLimit,
 		requireMention:                     requireMention,
 		mentionMode:                        mentionMode,

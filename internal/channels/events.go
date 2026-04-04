@@ -371,6 +371,8 @@ var toolStatusMap = map[string]string{
 	"find_and_post_meme":          "🖼 Finding an online meme image...",
 	"find_and_post_local_meme":    "🎬 Picking a local meme GIF/video...",
 	"find_and_post_local_sticker": "🧷 Picking a saved sticker...",
+	"so_dau_bai_today":            "📒 Checking today's sổ đầu bài...",
+	"so_dau_bai_manage":           "📒 Updating today's sổ đầu bài...",
 	// Memory
 	"memory_search":          "🧠 Searching memory...",
 	"memory_get":             "🧠 Retrieving memory...",

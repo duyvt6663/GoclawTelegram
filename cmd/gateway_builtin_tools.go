@@ -39,6 +39,8 @@ func builtinToolSeedData() []store.BuiltinToolDef {
 		{Name: "find_and_post_local_sticker", DisplayName: "Post Saved Sticker", Description: "Pick a previously learned Telegram sticker from configured local libraries using semantic search over saved metadata and attach it to the current reply. Prefer this for quick Telegram reactions and callbacks.", Category: "media", Enabled: true,
 			Settings: json.RawMessage(`{"libraries":[],"allowed_extensions":[".tgs",".webm",".webp"],"exclude_terms":[],"auto_capture":{"enabled":false}}`),
 		},
+		{Name: "so_dau_bai_today", DisplayName: "So Dau Bai Today", Description: "Show today's temporary Telegram block list. The list resets automatically each local day.", Category: "moderation", Enabled: true},
+		{Name: "so_dau_bai_manage", DisplayName: "So Dau Bai Manager", Description: "Add or remove someone from today's temporary Telegram block list. Only @duyvt6663, the lop truong, can use this.", Category: "moderation", Enabled: true},
 
 		// memory
 		{Name: "memory_search", DisplayName: "Memory Search", Description: "Search through the agent's long-term memory using semantic similarity", Category: "memory", Enabled: true,
