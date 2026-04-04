@@ -29,9 +29,9 @@ import (
 )
 
 // registerConfigChannels registers config-based channels as fallback when no DB instances are loaded.
-func registerConfigChannels(cfg *config.Config, channelMgr *channels.Manager, msgBus *bus.MessageBus, pgStores *store.Stores, instanceLoader *channels.InstanceLoader, stickerCaptureSvc *stickers.CaptureService, soDauBaiSvc *sodaubai.Service) {
+func registerConfigChannels(cfg *config.Config, channelMgr *channels.Manager, msgBus *bus.MessageBus, pgStores *store.Stores, instanceLoader *channels.InstanceLoader, stickerCaptureSvc *stickers.CaptureService, soDauBaiSvc *sodaubai.Service, soDauBaiPollSvc *sodaubai.PollService) {
 	if cfg.Channels.Telegram.Enabled && cfg.Channels.Telegram.Token != "" && instanceLoader == nil {
-		tg, err := telegram.New(cfg.Channels.Telegram, msgBus, pgStores.Pairing, nil, nil, nil, nil, nil, stickerCaptureSvc, soDauBaiSvc)
+		tg, err := telegram.New(cfg.Channels.Telegram, msgBus, pgStores.Pairing, nil, nil, nil, nil, nil, stickerCaptureSvc, soDauBaiSvc, soDauBaiPollSvc)
 		if err != nil {
 			slog.Error("failed to initialize telegram channel", "error", err)
 		} else {

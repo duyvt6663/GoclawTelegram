@@ -169,6 +169,7 @@ func runGateway() {
 		stickerCaptureSvc = stickers.NewCaptureService(pgStores.BuiltinTools, providerRegistry)
 	}
 	soDauBaiSvc := sodaubai.NewService(filepath.Join(dataDir, "so-dau-bai.json"))
+	soDauBaiPollSvc := sodaubai.NewPollService(filepath.Join(dataDir, "so-dau-bai-polls.json"))
 	setupMemoryEmbeddings(pgStores, providerRegistry)
 	if embProvider := resolveEmbeddingProvider(pgStores.Providers, providerRegistry, pgStores.SystemConfigs); embProvider != nil {
 		if t, ok := toolsReg.Get("find_and_post_local_meme"); ok {
@@ -581,7 +582,7 @@ func runGateway() {
 		instanceLoader = channels.NewInstanceLoader(pgStores.ChannelInstances, pgStores.Agents, channelMgr, msgBus, pgStores.Pairing)
 		instanceLoader.SetProviderRegistry(providerRegistry)
 		instanceLoader.SetPendingCompactionConfig(cfg.Channels.PendingCompaction)
-		instanceLoader.RegisterFactory(channels.TypeTelegram, telegram.FactoryWithStores(pgStores.Agents, pgStores.ConfigPermissions, pgStores.Teams, pgStores.SubagentTasks, pgStores.PendingMessages, stickerCaptureSvc, soDauBaiSvc))
+		instanceLoader.RegisterFactory(channels.TypeTelegram, telegram.FactoryWithStores(pgStores.Agents, pgStores.ConfigPermissions, pgStores.Teams, pgStores.SubagentTasks, pgStores.PendingMessages, stickerCaptureSvc, soDauBaiSvc, soDauBaiPollSvc))
 		instanceLoader.RegisterFactory(channels.TypeDiscord, discord.FactoryWithStores(pgStores.Agents, pgStores.ConfigPermissions, pgStores.PendingMessages))
 		instanceLoader.RegisterFactory(channels.TypeFeishu, feishu.FactoryWithPendingStore(pgStores.PendingMessages))
 		instanceLoader.RegisterFactory(channels.TypeZaloOA, zalo.Factory)
@@ -594,7 +595,19 @@ func runGateway() {
 	}
 
 	// Register config-based channels as fallback when no DB instances loaded.
-	registerConfigChannels(cfg, channelMgr, msgBus, pgStores, instanceLoader, stickerCaptureSvc, soDauBaiSvc)
+	toolsReg.Register(tools.NewCreateSoDauBaiPollTool(soDauBaiSvc, soDauBaiPollSvc, func(channel string) tools.SoDauBaiPollCreator {
+		if strings.TrimSpace(channel) == "" {
+			return nil
+		}
+		ch, ok := channelMgr.GetChannel(channel)
+		if !ok {
+			return nil
+		}
+		creator, _ := ch.(tools.SoDauBaiPollCreator)
+		return creator
+	}))
+
+	registerConfigChannels(cfg, channelMgr, msgBus, pgStores, instanceLoader, stickerCaptureSvc, soDauBaiSvc, soDauBaiPollSvc)
 
 	// Register channels/instances/links/teams RPC methods
 	wireChannelRPCMethods(server, pgStores, channelMgr, agentRouter, msgBus, workspace)

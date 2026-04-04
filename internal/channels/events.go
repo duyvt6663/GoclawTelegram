@@ -373,6 +373,7 @@ var toolStatusMap = map[string]string{
 	"find_and_post_local_sticker": "🧷 Picking a saved sticker...",
 	"so_dau_bai_today":            "📒 Checking today's sổ đầu bài...",
 	"so_dau_bai_manage":           "📒 Updating today's sổ đầu bài...",
+	"create_so_dau_bai_poll":      "🗳️ Opening a sổ đầu bài vote...",
 	// Memory
 	"memory_search":          "🧠 Searching memory...",
 	"memory_get":             "🧠 Retrieving memory...",

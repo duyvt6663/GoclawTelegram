@@ -112,6 +112,7 @@ var coreToolSummaries = map[string]string{
 	"team_tasks":                  "Team task board — track progress, manage dependencies (spawn auto-creates delegation tasks)",
 	"list_group_members":          "List all members of the current group chat (Feishu/Lark only)",
 	"create_forum_topic":          "Create a forum topic in a Telegram supergroup",
+	"create_so_dau_bai_poll":      "Create a non-anonymous Telegram vote in the current group/topic to decide whether someone should be added to today's sổ đầu bài",
 
 	// Legacy tool aliases — kept for backward compatibility with older clients
 	"edit_file":      "Alias for edit — Edit a file by replacing exact text matches",

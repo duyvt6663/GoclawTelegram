@@ -45,6 +45,7 @@ type Channel struct {
 	groupHistory                       *channels.PendingHistory
 	stickerCapture                     *stickers.CaptureService
 	soDauBai                           *sodaubai.Service
+	soDauBaiPolls                      *sodaubai.PollService
 	historyLimit                       int
 	requireMention                     bool
 	mentionMode                        string // "strict" (default) or "yield"
@@ -72,7 +73,7 @@ func (c *thinkingCancel) Cancel() {
 // configPermStore is optional (nil = group file writer commands disabled).
 // teamStore is optional (nil = /tasks, /task_detail commands disabled).
 // subagentTaskStore is optional (nil = /subagents, /subagent commands disabled).
-func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, subagentTaskStore store.SubagentTaskStore, pendingStore store.PendingMessageStore, stickerCapture *stickers.CaptureService, soDauBai *sodaubai.Service) (*Channel, error) {
+func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, subagentTaskStore store.SubagentTaskStore, pendingStore store.PendingMessageStore, stickerCapture *stickers.CaptureService, soDauBai *sodaubai.Service, soDauBaiPolls *sodaubai.PollService) (*Channel, error) {
 	var opts []telego.BotOption
 
 	if cfg.APIServer != "" {
@@ -145,6 +146,7 @@ func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.Pai
 		groupHistory:                       channels.MakeHistory(channels.TypeTelegram, pendingStore, base.TenantID()),
 		stickerCapture:                     stickerCapture,
 		soDauBai:                           soDauBai,
+		soDauBaiPolls:                      soDauBaiPolls,
 		historyLimit:                       historyLimit,
 		requireMention:                     requireMention,
 		mentionMode:                        mentionMode,
@@ -168,6 +170,8 @@ func (c *Channel) Start(ctx context.Context) error {
 			"message",
 			"edited_message",
 			"callback_query",
+			"poll",
+			"poll_answer",
 			"my_chat_member",
 		},
 	})
@@ -239,6 +243,30 @@ func (c *Channel) Start(ctx context.Context) error {
 					case <-pollCtx.Done():
 						return
 					}
+				} else if update.PollAnswer != nil {
+					select {
+					case c.handlerSem <- struct{}{}:
+						c.handlerWg.Add(1)
+						go func(answer *telego.PollAnswer) {
+							defer c.handlerWg.Done()
+							defer func() { <-c.handlerSem }()
+							c.handlePollAnswer(pollCtx, answer)
+						}(update.PollAnswer)
+					case <-pollCtx.Done():
+						return
+					}
+				} else if update.Poll != nil {
+					select {
+					case c.handlerSem <- struct{}{}:
+						c.handlerWg.Add(1)
+						go func(poll *telego.Poll) {
+							defer c.handlerWg.Done()
+							defer func() { <-c.handlerSem }()
+							c.handlePollUpdate(pollCtx, poll)
+						}(update.Poll)
+					case <-pollCtx.Done():
+						return
+					}
 				} else {
 					// Log non-message updates for delivery diagnostics
 					updateType := "unknown"
@@ -249,6 +277,10 @@ func (c *Channel) Start(ctx context.Context) error {
 						updateType = "channel_post"
 					case update.MyChatMember != nil:
 						updateType = "my_chat_member"
+					case update.PollAnswer != nil:
+						updateType = "poll_answer"
+					case update.Poll != nil:
+						updateType = "poll"
 					case update.ChatMember != nil:
 						updateType = "chat_member"
 					}

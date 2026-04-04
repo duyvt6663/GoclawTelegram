@@ -41,6 +41,7 @@ func builtinToolSeedData() []store.BuiltinToolDef {
 		},
 		{Name: "so_dau_bai_today", DisplayName: "So Dau Bai Today", Description: "Show today's temporary Telegram block list. The list resets automatically each local day.", Category: "moderation", Enabled: true},
 		{Name: "so_dau_bai_manage", DisplayName: "So Dau Bai Manager", Description: "Add or remove someone from today's temporary Telegram block list. Only @duyvt6663, the lop truong, can use this.", Category: "moderation", Enabled: true},
+		{Name: "create_so_dau_bai_poll", DisplayName: "Open So Dau Bai Vote", Description: "Create a non-anonymous Telegram group poll to vote whether someone should be added to today's sổ đầu bài. At 5 yes votes, the bot adds them automatically and announces it.", Category: "moderation", Enabled: true},
 
 		// memory
 		{Name: "memory_search", DisplayName: "Memory Search", Description: "Search through the agent's long-term memory using semantic similarity", Category: "memory", Enabled: true,

@@ -3,6 +3,7 @@ package sodaubai
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +39,7 @@ type Service struct {
 
 func NewService(path string) *Service {
 	candidates := []string{path}
-	fallback := filepath.Join(os.TempDir(), "goclaw", "so-dau-bai.json")
+	fallback := fallbackPath(path, "so-dau-bai", ".json")
 	if fallback != "" && fallback != path {
 		candidates = append(candidates, fallback)
 	}
@@ -48,6 +49,24 @@ func NewService(path string) *Service {
 		loc:    time.Local,
 		always: make(map[string][]string),
 	}
+}
+
+func fallbackPath(primaryPath, stem, ext string) string {
+	stem = strings.TrimSpace(stem)
+	if stem == "" {
+		return ""
+	}
+	if ext == "" {
+		ext = ".json"
+	}
+	primaryPath = strings.TrimSpace(primaryPath)
+	name := stem
+	if primaryPath != "" {
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(primaryPath))
+		name = fmt.Sprintf("%s-%08x", stem, h.Sum32())
+	}
+	return filepath.Join(os.TempDir(), "goclaw", name+ext)
 }
 
 func ScopeKey(channel, localKey, chatID string) string {
@@ -100,6 +119,40 @@ func (s *Service) TodayForScope(scope string) (State, error) {
 	state := cloneState(s.state)
 	state.Entries = mergeScopeAlwaysEntries(state.Entries, state.Date, s.alwaysEntriesLocked(scope))
 	return state, nil
+}
+
+func (s *Service) FindTodayForScope(scope, target string) (*Entry, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, nil
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.ensureLoadedLocked(); err != nil {
+		return nil, err
+	}
+	if dirty := s.ensureTodayLocked(); dirty {
+		if err := s.saveLocked(); err != nil {
+			return nil, err
+		}
+	}
+
+	for _, entry := range s.state.Entries {
+		if sameRule(entry.Target, target) {
+			matched := entry
+			return &matched, nil
+		}
+	}
+	for _, entry := range s.alwaysEntriesLocked(scope) {
+		if sameRule(entry.Target, target) {
+			matched := entry
+			matched.AddedDay = s.state.Date
+			return &matched, nil
+		}
+	}
+	return nil, nil
 }
 
 func (s *Service) AddToday(target, addedBy, note string) (Entry, bool, error) {

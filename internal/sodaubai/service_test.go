@@ -8,6 +8,7 @@ import (
 
 func TestServiceResetsWhenDayChanges(t *testing.T) {
 	svc := NewService(filepath.Join(t.TempDir(), "so-dau-bai.json"))
+	svc.paths = []string{filepath.Join(t.TempDir(), "isolated-so-dau-bai.json")}
 	loc := time.FixedZone("UTC+7", 7*60*60)
 	svc.loc = loc
 	svc.now = func() time.Time {
@@ -54,6 +55,7 @@ func TestServiceResetsWhenDayChanges(t *testing.T) {
 
 func TestServiceMatchAndRemoveToday(t *testing.T) {
 	svc := NewService(filepath.Join(t.TempDir(), "so-dau-bai.json"))
+	svc.paths = []string{filepath.Join(t.TempDir(), "isolated-so-dau-bai.json")}
 	loc := time.FixedZone("UTC+7", 7*60*60)
 	svc.loc = loc
 	svc.now = func() time.Time {
@@ -91,6 +93,7 @@ func TestServiceMatchAndRemoveToday(t *testing.T) {
 
 func TestServiceScopeAlwaysRulesAreIncludedAndPersistAcrossDayRollover(t *testing.T) {
 	svc := NewService(filepath.Join(t.TempDir(), "so-dau-bai.json"))
+	svc.paths = []string{filepath.Join(t.TempDir(), "isolated-so-dau-bai.json")}
 	loc := time.FixedZone("UTC+7", 7*60*60)
 	svc.loc = loc
 	svc.now = func() time.Time {

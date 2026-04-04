@@ -47,19 +47,19 @@ type telegramInstanceConfig struct {
 // Factory creates a Telegram channel from DB instance data (no extra stores).
 func Factory(name string, creds json.RawMessage, cfg json.RawMessage,
 	msgBus *bus.MessageBus, pairingSvc store.PairingStore) (channels.Channel, error) {
-	return buildChannel(name, creds, cfg, msgBus, pairingSvc, nil, nil, nil, nil, nil, nil, nil)
+	return buildChannel(name, creds, cfg, msgBus, pairingSvc, nil, nil, nil, nil, nil, nil, nil, nil)
 }
 
 // FactoryWithStores returns a ChannelFactory that includes agent, configPerm, team, subagentTask, and pending message stores.
-func FactoryWithStores(agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, subagentTaskStore store.SubagentTaskStore, pendingStore store.PendingMessageStore, stickerCapture *stickers.CaptureService, soDauBai *sodaubai.Service) channels.ChannelFactory {
+func FactoryWithStores(agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, subagentTaskStore store.SubagentTaskStore, pendingStore store.PendingMessageStore, stickerCapture *stickers.CaptureService, soDauBai *sodaubai.Service, soDauBaiPolls *sodaubai.PollService) channels.ChannelFactory {
 	return func(name string, creds json.RawMessage, cfg json.RawMessage,
 		msgBus *bus.MessageBus, pairingSvc store.PairingStore) (channels.Channel, error) {
-		return buildChannel(name, creds, cfg, msgBus, pairingSvc, agentStore, configPermStore, teamStore, subagentTaskStore, pendingStore, stickerCapture, soDauBai)
+		return buildChannel(name, creds, cfg, msgBus, pairingSvc, agentStore, configPermStore, teamStore, subagentTaskStore, pendingStore, stickerCapture, soDauBai, soDauBaiPolls)
 	}
 }
 
 func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
-	msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, subagentTaskStore store.SubagentTaskStore, pendingStore store.PendingMessageStore, stickerCapture *stickers.CaptureService, soDauBai *sodaubai.Service) (channels.Channel, error) {
+	msgBus *bus.MessageBus, pairingSvc store.PairingStore, agentStore store.AgentStore, configPermStore store.ConfigPermissionStore, teamStore store.TeamStore, subagentTaskStore store.SubagentTaskStore, pendingStore store.PendingMessageStore, stickerCapture *stickers.CaptureService, soDauBai *sodaubai.Service, soDauBaiPolls *sodaubai.PollService) (channels.Channel, error) {
 
 	var c telegramCreds
 	if len(creds) > 0 {
@@ -119,7 +119,7 @@ func buildChannel(name string, creds json.RawMessage, cfg json.RawMessage,
 		tgCfg.GroupPolicy = "pairing"
 	}
 
-	ch, err := New(tgCfg, msgBus, pairingSvc, agentStore, configPermStore, teamStore, subagentTaskStore, pendingStore, stickerCapture, soDauBai)
+	ch, err := New(tgCfg, msgBus, pairingSvc, agentStore, configPermStore, teamStore, subagentTaskStore, pendingStore, stickerCapture, soDauBai, soDauBaiPolls)
 	if err != nil {
 		return nil, err
 	}
