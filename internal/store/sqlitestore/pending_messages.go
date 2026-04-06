@@ -96,6 +96,22 @@ func (s *SQLitePendingMessageStore) DeleteByKey(ctx context.Context, channelName
 	return err
 }
 
+func (s *SQLitePendingMessageStore) DeleteBefore(ctx context.Context, channelName string, cutoff time.Time) (int64, error) {
+	tClause, tArgs, err := scopeClause(ctx)
+	if err != nil {
+		return 0, err
+	}
+	args := append([]any{channelName, cutoff}, tArgs...)
+	result, err := s.db.ExecContext(ctx,
+		`DELETE FROM channel_pending_messages WHERE channel_name = ? AND created_at < ?`+tClause,
+		args...,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (s *SQLitePendingMessageStore) Compact(ctx context.Context, deleteIDs []uuid.UUID, summary *store.PendingMessage) error {
 	if len(deleteIDs) == 0 {
 		return nil

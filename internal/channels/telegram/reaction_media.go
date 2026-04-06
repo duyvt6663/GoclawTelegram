@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	stickerReactionBaseRatePct = 30
+	stickerReactionBaseRatePct = 20
 	commentReactionHitRatePct  = 20
 	maxReactionRatePct         = 100
 )

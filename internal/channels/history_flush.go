@@ -51,6 +51,28 @@ func (ph *PendingHistory) removeFromFlushBuf(historyKey string) {
 	ph.flushBuf = filtered
 }
 
+// removeFromFlushBufBefore removes queued pending messages older than cutoff.
+func (ph *PendingHistory) removeFromFlushBufBefore(cutoff time.Time) int {
+	if cutoff.IsZero() {
+		return 0
+	}
+
+	ph.flushMu.Lock()
+	defer ph.flushMu.Unlock()
+
+	filtered := ph.flushBuf[:0]
+	removed := 0
+	for _, msg := range ph.flushBuf {
+		if !msg.CreatedAt.IsZero() && msg.CreatedAt.Before(cutoff) {
+			removed++
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	ph.flushBuf = filtered
+	return removed
+}
+
 // flushNow force-flushes the buffer to DB synchronously. Used before compaction.
 func (ph *PendingHistory) flushNow() {
 	ph.flushMu.Lock()

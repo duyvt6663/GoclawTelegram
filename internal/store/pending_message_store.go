@@ -43,6 +43,9 @@ type PendingMessageStore interface {
 	// DeleteByKey removes all pending messages for a channel+historyKey.
 	DeleteByKey(ctx context.Context, channelName, historyKey string) error
 
+	// DeleteBefore removes pending messages older than cutoff for a channel.
+	DeleteBefore(ctx context.Context, channelName string, cutoff time.Time) (int64, error)
+
 	// Compact atomically deletes old messages (by IDs) and inserts a summary row.
 	Compact(ctx context.Context, deleteIDs []uuid.UUID, summary *PendingMessage) error
 

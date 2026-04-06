@@ -182,6 +182,20 @@ func (c *Channel) Start(ctx context.Context) error {
 	}
 
 	c.SetRunning(true)
+	if pruned, pruneErr := c.groupHistory.PruneBefore(startupCutoff); pruneErr != nil {
+		slog.Warn("telegram stale pending history prune failed",
+			"cutoff_unix", startupCutoff.Unix(),
+			"error", pruneErr,
+		)
+	} else if pruned.RAMEntries > 0 || pruned.FlushQueued > 0 || pruned.DBRows > 0 {
+		slog.Info("telegram stale pending history pruned after reconnect",
+			"cutoff_unix", startupCutoff.Unix(),
+			"ram_entries", pruned.RAMEntries,
+			"queued_entries", pruned.FlushQueued,
+			"db_rows", pruned.DBRows,
+			"keys", pruned.Keys,
+		)
+	}
 	c.groupHistory.StartFlusher()
 	c.handlerSem = make(chan struct{}, 20) // limit concurrent message handlers
 	slog.Info("telegram bot connected", "username", c.bot.Username())

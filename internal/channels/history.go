@@ -81,6 +81,14 @@ type PendingHistory struct {
 	compacting sync.Map // historyKey → bool
 }
 
+// PendingHistoryPruneResult reports how many stale pending entries were removed.
+type PendingHistoryPruneResult struct {
+	Keys        int
+	RAMEntries  int
+	FlushQueued int
+	DBRows      int64
+}
+
 // NewPendingHistory creates a new RAM-only pending history tracker.
 func NewPendingHistory() *PendingHistory {
 	return &PendingHistory{entries: make(map[string][]HistoryEntry)}
@@ -267,6 +275,63 @@ func (ph *PendingHistory) BuildContext(historyKey, currentMessage string, limit 
 		strings.Join(lines, "\n"), currentMessage)
 }
 
+// PruneBefore removes pending history older than cutoff from RAM, queued flushes,
+// and the backing store for this channel.
+func (ph *PendingHistory) PruneBefore(cutoff time.Time) (PendingHistoryPruneResult, error) {
+	var result PendingHistoryPruneResult
+	if cutoff.IsZero() {
+		return result, nil
+	}
+
+	var toClean []HistoryEntry
+
+	ph.mu.Lock()
+	for historyKey, entries := range ph.entries {
+		kept := entries[:0]
+		removedForKey := 0
+		for _, entry := range entries {
+			if isStalePendingHistoryEntry(entry, cutoff) {
+				toClean = append(toClean, entry)
+				removedForKey++
+				continue
+			}
+			kept = append(kept, entry)
+		}
+		if removedForKey == 0 {
+			continue
+		}
+		result.RAMEntries += removedForKey
+		result.Keys++
+		if len(kept) == 0 {
+			delete(ph.entries, historyKey)
+			ph.removeFromOrder(historyKey)
+			continue
+		}
+		ph.entries[historyKey] = kept
+	}
+	ph.mu.Unlock()
+
+	if len(toClean) > 0 {
+		go cleanupMedia(toClean)
+	}
+
+	result.FlushQueued = ph.removeFromFlushBufBefore(cutoff)
+
+	if ph.store == nil {
+		return result, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ph.tenantCtx(), 15*time.Second)
+	defer cancel()
+
+	deleted, err := ph.store.DeleteBefore(ctx, ph.channelName, cutoff)
+	if err != nil {
+		return result, err
+	}
+	result.DBRows = deleted
+	return result, nil
+}
+
 // GetEntries returns a copy of pending entries for a group.
 // Falls back to DB when RAM is empty (post-restart / LRU eviction).
 func (ph *PendingHistory) GetEntries(historyKey string) []HistoryEntry {
@@ -374,4 +439,11 @@ func cleanupMedia(entries []HistoryEntry) {
 			}
 		}
 	}
+}
+
+func isStalePendingHistoryEntry(entry HistoryEntry, cutoff time.Time) bool {
+	if cutoff.IsZero() || entry.Timestamp.IsZero() {
+		return false
+	}
+	return entry.Timestamp.Before(cutoff)
 }

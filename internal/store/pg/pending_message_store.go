@@ -93,6 +93,21 @@ func (s *PGPendingMessageStore) DeleteByKey(ctx context.Context, channelName, hi
 	return err
 }
 
+func (s *PGPendingMessageStore) DeleteBefore(ctx context.Context, channelName string, cutoff time.Time) (int64, error) {
+	tClause, tArgs, _, err := scopeClause(ctx, 3)
+	if err != nil {
+		return 0, err
+	}
+	result, err := s.db.ExecContext(ctx,
+		`DELETE FROM channel_pending_messages WHERE channel_name = $1 AND created_at < $2`+tClause,
+		append([]any{channelName, cutoff}, tArgs...)...,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (s *PGPendingMessageStore) Compact(ctx context.Context, deleteIDs []uuid.UUID, summary *store.PendingMessage) error {
 	if len(deleteIDs) == 0 {
 		return nil

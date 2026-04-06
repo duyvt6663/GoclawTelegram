@@ -63,8 +63,8 @@ func TestShouldSampleReaction_DeterministicAndMixed(t *testing.T) {
 		Chat:      telego.Chat{ID: -10012345},
 		Sticker:   &telego.Sticker{FileID: "sticker-file-id"},
 	}
-	first := shouldSampleReaction(msg, 30)
-	second := shouldSampleReaction(msg, 30)
+	first := shouldSampleReaction(msg, 20)
+	second := shouldSampleReaction(msg, 20)
 	if first != second {
 		t.Fatalf("expected deterministic sticker sampling, got %v then %v", first, second)
 	}
@@ -77,7 +77,7 @@ func TestShouldSampleReaction_DeterministicAndMixed(t *testing.T) {
 			Chat:      telego.Chat{ID: -10012345},
 			Sticker:   &telego.Sticker{FileID: "sticker-file-id"},
 		}
-		if shouldSampleReaction(msg, 30) {
+		if shouldSampleReaction(msg, 20) {
 			sawTrue = true
 		} else {
 			sawFalse = true
