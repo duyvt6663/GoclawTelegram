@@ -90,3 +90,4 @@ compose.d/*
 /.mise
 .gocache/
 .local-stickers/
+*/__pycache__/

@@ -1,0 +1,2 @@
+tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git
+mcp>=1.0.0

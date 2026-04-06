@@ -3,12 +3,14 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	mcpclient "github.com/mark3labs/mcp-go/client"
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
@@ -127,7 +129,15 @@ func (t *BridgeTool) Execute(ctx context.Context, args map[string]any) *tools.Re
 	// Wrap MCP tool results as external/untrusted content to prevent prompt injection.
 	// MCP servers may be third-party and return adversarial content.
 	wrapped := wrapMCPContent(text, t.serverName, t.toolName)
-	return tools.NewResult(wrapped)
+	resultObj := tools.NewResult(wrapped)
+	if render, err := maybeBuildTradingTelegramRender(ctx, t.serverName, t.toolName, wrapped); err != nil {
+		slog.Debug("mcp telegram render skipped", "server", t.serverName, "tool", t.toolName, "error", err)
+	} else if render != nil {
+		resultObj.Media = []bus.MediaFile{render.Media}
+		resultObj.Deliverable = render.Deliverable
+		resultObj.ForLLM = wrapped + render.Note
+	}
+	return resultObj
 }
 
 // inputSchemaToMap converts mcp.ToolInputSchema to the map format expected by tools.Tool.Parameters().
