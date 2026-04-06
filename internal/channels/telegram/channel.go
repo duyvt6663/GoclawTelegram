@@ -157,6 +157,7 @@ func New(cfg config.TelegramConfig, msgBus *bus.MessageBus, pairingSvc store.Pai
 // Start begins long polling for Telegram updates.
 func (c *Channel) Start(ctx context.Context) error {
 	slog.Info("starting telegram bot (polling mode)")
+	startupCutoff := telegramUpdateCutoff(time.Now())
 
 	// Create a cancellable context for the polling goroutine.
 	// Stop() cancels this context to cleanly shut down long polling.
@@ -220,6 +221,16 @@ func (c *Channel) Start(ctx context.Context) error {
 					return
 				}
 				if update.Message != nil {
+					if isStaleTelegramMessage(update.Message, startupCutoff) {
+						slog.Info("telegram stale message skipped after reconnect",
+							"chat_id", update.Message.Chat.ID,
+							"message_id", update.Message.MessageID,
+							"message_date", update.Message.Date,
+							"cutoff_unix", startupCutoff.Unix(),
+							"age_seconds", int(time.Since(time.Unix(int64(update.Message.Date), 0)).Seconds()),
+						)
+						continue
+					}
 					select {
 					case c.handlerSem <- struct{}{}:
 						c.handlerWg.Add(1)
