@@ -102,6 +102,7 @@ type tradingFontSet struct {
 	Heading  font.Face
 	Body     font.Face
 	BodyBold font.Face
+	Badge    font.Face
 	Small    font.Face
 }
 
@@ -270,7 +271,7 @@ func buildGenericTradingTelegramRender(ctx context.Context, toolName, payload st
 func renderMarketDataCard(ticker, date string, rows []marketPriceRow, latest map[string]indicatorPoint) ([]byte, error) {
 	const (
 		cardW = 1200
-		cardH = 760
+		cardH = 860
 	)
 	img := image.NewRGBA(image.Rect(0, 0, cardW, cardH))
 	theme := tradingThemeDefault
@@ -294,18 +295,26 @@ func renderMarketDataCard(ticker, date string, rows []marketPriceRow, latest map
 	drawText(img, fonts.Body, color.RGBA{0xF6, 0xF8, 0xFB, 0xFF}, 56, 102, subtitle)
 
 	badgeText := formatSignedPercent(changePct)
-	drawPill(img, fonts.BodyBold, badgeText, image.Rect(cardW-240, 34, cardW-56, 88), color.RGBA{255, 255, 255, 38}, color.White)
+	drawPill(
+		img,
+		fonts.Badge,
+		badgeText,
+		image.Rect(cardW-270, 24, cardW-40, 96),
+		color.RGBA{0xFF, 0xFC, 0xF6, 0xFF},
+		accent,
+		color.RGBA{0xD7, 0xCF, 0xC2, 0xFF},
+	)
 
-	chartPanel := image.Rect(42, 146, 812, 642)
-	sidePanel := image.Rect(840, 146, 1158, 642)
+	chartPanel := image.Rect(42, 146, 812, 744)
+	sidePanel := image.Rect(840, 146, 1158, 744)
 	drawPanel(img, chartPanel, theme)
 	drawPanel(img, sidePanel, theme)
 
 	drawText(img, fonts.Heading, theme.Text, chartPanel.Min.X+26, chartPanel.Min.Y+34, "Close Price")
 	drawText(img, fonts.Small, theme.Muted, chartPanel.Min.X+26, chartPanel.Min.Y+58, fmt.Sprintf("%d trading days", len(rows)))
 
-	priceRect := image.Rect(chartPanel.Min.X+24, chartPanel.Min.Y+86, chartPanel.Max.X-26, chartPanel.Min.Y+366)
-	volumeRect := image.Rect(chartPanel.Min.X+24, chartPanel.Min.Y+412, chartPanel.Max.X-26, chartPanel.Max.Y-32)
+	priceRect := image.Rect(chartPanel.Min.X+24, chartPanel.Min.Y+86, chartPanel.Max.X-26, chartPanel.Min.Y+382)
+	volumeRect := image.Rect(chartPanel.Min.X+24, chartPanel.Min.Y+410, chartPanel.Max.X-26, chartPanel.Max.Y-28)
 	drawPriceChart(img, priceRect, rows, fonts.Small, theme, accent)
 	drawVolumeBars(img, volumeRect, rows, fonts.Small, theme, accent)
 
@@ -403,7 +412,15 @@ func renderAnalysisCard(parsed analysisPayload) ([]byte, error) {
 	fillRect(img, image.Rect(0, 0, cardW, 118), accent)
 	drawText(img, fonts.Title, color.White, 56, 72, strings.TrimSpace(defaultTicker(parsed.Ticker))+" Trading Call")
 	drawText(img, fonts.Body, color.RGBA{0xF1, 0xF4, 0xF7, 0xFF}, 56, 102, fmt.Sprintf("Decision snapshot for %s", friendlyTradingDate(parsed.Date)))
-	drawPill(img, fonts.BodyBold, emptyFallback(signal, "ANALYSIS"), image.Rect(cardW-268, 30, cardW-56, 88), color.RGBA{255, 255, 255, 40}, color.White)
+	drawPill(
+		img,
+		fonts.Badge,
+		emptyFallback(signal, "ANALYSIS"),
+		image.Rect(cardW-292, 22, cardW-40, 96),
+		color.RGBA{0xFF, 0xFC, 0xF6, 0xFF},
+		accent,
+		color.RGBA{0xD7, 0xCF, 0xC2, 0xFF},
+	)
 
 	left := image.Rect(42, 146, 578, cardH-42)
 	rightTop := image.Rect(606, 146, cardW-42, 480)
@@ -741,7 +758,7 @@ func drawPriceChart(img *image.RGBA, rect image.Rectangle, rows []marketPriceRow
 func drawVolumeBars(img *image.RGBA, rect image.Rectangle, rows []marketPriceRow, small font.Face, theme tradingTheme, accent color.RGBA) {
 	fillRect(img, rect, color.RGBA{0xFC, 0xFA, 0xF7, 0xFF})
 	strokeRect(img, rect, theme.Border)
-	drawText(img, small, theme.Muted, rect.Min.X+10, rect.Min.Y+18, "Volume")
+	drawText(img, small, theme.Muted, rect.Min.X+12, rect.Min.Y+20, "Volume")
 	if len(rows) == 0 {
 		return
 	}
@@ -754,20 +771,24 @@ func drawVolumeBars(img *image.RGBA, rect image.Rectangle, rows []marketPriceRow
 	if maxVolume <= 0 {
 		return
 	}
-	barAreaTop := rect.Min.Y + 26
-	barAreaBottom := rect.Max.Y - 18
+	barAreaTop := rect.Min.Y + 30
+	barAreaBottom := rect.Max.Y - 22
 	barAreaH := float64(barAreaBottom - barAreaTop)
-	barW := max(10, (rect.Dx()-30)/max(1, len(rows)*2))
-	gap := barW
+	barW := max(12, (rect.Dx()-26)/max(1, len(rows)*2))
+	gap := max(8, barW/2)
 	x := rect.Min.X + 18
 	barColor := color.RGBA{accent.R, accent.G, accent.B, 180}
 	for _, row := range rows {
 		h := int((row.Volume / maxVolume) * barAreaH)
+		if row.Volume > 0 {
+			h = max(18, h)
+		}
 		barRect := image.Rect(x, barAreaBottom-h, x+barW, barAreaBottom)
 		fillRect(img, barRect, barColor)
 		x += barW + gap
 	}
-	drawText(img, small, theme.Muted, rect.Max.X-118, rect.Min.Y+18, "max "+formatCompactNumber(maxVolume))
+	drawLine(img, rect.Min.X+14, barAreaBottom, rect.Max.X-14, barAreaBottom, theme.Border)
+	drawText(img, small, theme.Muted, rect.Max.X-126, rect.Min.Y+20, "max "+formatCompactNumber(maxVolume))
 }
 
 func drawSectionBlock(img *image.RGBA, fonts tradingFontSet, theme tradingTheme, rect image.Rectangle, title, body string) {
@@ -814,11 +835,12 @@ func drawPanel(img *image.RGBA, rect image.Rectangle, theme tradingTheme) {
 	strokeRect(img, rect, theme.Border)
 }
 
-func drawPill(img *image.RGBA, face font.Face, text string, rect image.Rectangle, fill color.Color, fg color.Color) {
+func drawPill(img *image.RGBA, face font.Face, text string, rect image.Rectangle, fill color.Color, fg color.Color, border color.Color) {
 	fillRect(img, rect, fill)
+	strokeRect(img, rect, border)
 	textW := measureText(face, text)
 	x := rect.Min.X + (rect.Dx()-textW)/2
-	y := rect.Min.Y + rect.Dy()/2 + face.Metrics().Ascent.Ceil()/2 - 2
+	y := rect.Min.Y + rect.Dy()/2 + face.Metrics().Ascent.Ceil()/2 - 3
 	drawText(img, face, fg, x, y, text)
 }
 
@@ -938,6 +960,7 @@ func newTradingFonts() tradingFontSet {
 		Heading:  newTradingFace(20, true),
 		Body:     newTradingFace(16, false),
 		BodyBold: newTradingFace(17, true),
+		Badge:    newTradingFace(22, true),
 		Small:    newTradingFace(13, false),
 	}
 }
