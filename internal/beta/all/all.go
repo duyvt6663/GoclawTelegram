@@ -4,5 +4,6 @@ package all
 
 import (
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/_example"
+	_ "github.com/nextlevelbuilder/goclaw/internal/beta/daily_discipline"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/feature_requests"
 )

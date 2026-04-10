@@ -15,18 +15,32 @@ import (
 
 const soDauBaiPollAddedBy = "@tap_the_lop"
 
-func (c *Channel) CreateSoDauBaiPoll(ctx context.Context, chatID int64, threadID int, question, yesOption, noOption string, openPeriodSeconds int) (string, int, error) {
+// CreatePoll posts a non-anonymous single-choice Telegram poll and returns the
+// poll ID plus the message ID that contains it.
+func (c *Channel) CreatePoll(ctx context.Context, chatID int64, threadID int, question string, options []string, openPeriodSeconds int) (string, int, error) {
+	if len(options) < 2 {
+		return "", 0, fmt.Errorf("telegram poll requires at least two options")
+	}
+
+	pollOptions := make([]telego.InputPollOption, 0, len(options))
+	for _, option := range options {
+		text := strings.TrimSpace(option)
+		if text == "" {
+			return "", 0, fmt.Errorf("telegram poll option cannot be empty")
+		}
+		pollOptions = append(pollOptions, telego.InputPollOption{Text: text})
+	}
+
 	isAnonymous := false
 	params := &telego.SendPollParams{
-		ChatID:   telego.ChatID{ID: chatID},
-		Question: strings.TrimSpace(question),
-		Options: []telego.InputPollOption{
-			{Text: strings.TrimSpace(yesOption)},
-			{Text: strings.TrimSpace(noOption)},
-		},
+		ChatID:                telego.ChatID{ID: chatID},
+		Question:              strings.TrimSpace(question),
+		Options:               pollOptions,
 		IsAnonymous:           &isAnonymous,
 		AllowsMultipleAnswers: false,
-		OpenPeriod:            openPeriodSeconds,
+	}
+	if openPeriodSeconds > 0 {
+		params.OpenPeriod = openPeriodSeconds
 	}
 	if sendThreadID := resolveThreadIDForSend(threadID); sendThreadID > 0 {
 		params.MessageThreadID = sendThreadID
@@ -40,6 +54,22 @@ func (c *Channel) CreateSoDauBaiPoll(ctx context.Context, chatID int64, threadID
 		return "", 0, fmt.Errorf("telegram API returned no poll id")
 	}
 	return msg.Poll.ID, msg.MessageID, nil
+}
+
+func (c *Channel) CreateSoDauBaiPoll(ctx context.Context, chatID int64, threadID int, question, yesOption, noOption string, openPeriodSeconds int) (string, int, error) {
+	return c.CreatePoll(ctx, chatID, threadID, question, []string{yesOption, noOption}, openPeriodSeconds)
+}
+
+// StopPoll closes a Telegram poll message by message ID.
+func (c *Channel) StopPoll(ctx context.Context, chatID int64, messageID int) error {
+	if messageID <= 0 {
+		return nil
+	}
+	_, err := c.bot.StopPoll(ctx, &telego.StopPollParams{
+		ChatID:    telego.ChatID{ID: chatID},
+		MessageID: messageID,
+	})
+	return err
 }
 
 func (c *Channel) handlePollAnswer(ctx context.Context, answer *telego.PollAnswer) {

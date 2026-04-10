@@ -14,7 +14,7 @@ type MessageBus struct {
 	outbound chan OutboundMessage
 
 	// Channel message handlers (channel name → handler)
-	handlers map[string]MessageHandler
+	handlers  map[string]MessageHandler
 	handlerMu sync.RWMutex
 
 	// Event subscribers (subscriber ID → handler)
@@ -119,19 +119,30 @@ func (mb *MessageBus) Unsubscribe(id string) {
 // from crashing the entire event bus.
 func (mb *MessageBus) Broadcast(event Event) {
 	mb.subMu.RLock()
-	defer mb.subMu.RUnlock()
+	snapshot := make([]struct {
+		id      string
+		handler EventHandler
+	}, 0, len(mb.subscribers))
 	for id, handler := range mb.subscribers {
+		snapshot = append(snapshot, struct {
+			id      string
+			handler EventHandler
+		}{id: id, handler: handler})
+	}
+	mb.subMu.RUnlock()
+
+	for _, sub := range snapshot {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
 					slog.Error("bus: subscriber panicked",
-						"subscriber", id,
+						"subscriber", sub.id,
 						"event", event.Name,
 						"panic", fmt.Sprint(r),
 					)
 				}
 			}()
-			handler(event)
+			sub.handler(event)
 		}()
 	}
 }

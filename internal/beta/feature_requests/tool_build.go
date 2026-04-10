@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	buildTimeout              = 10 * time.Minute
+	buildTimeout              = 2 * time.Hour
 	buildMaxAttempts          = 3
 	buildFailureExcerptSize   = 4000
 	buildArtifactsMarker      = "BUILD_ARTIFACTS:"
@@ -148,7 +148,9 @@ func (t *buildFeatureTool) runCodex(req *FeatureRequest, retrying bool, workspac
 	)
 
 	for attempt := 1; attempt <= attempts; attempt++ {
+		attemptStartedAt := time.Now()
 		output, err = t.runCodexPrompt(ctx, workspace, prompt)
+		err = describeBuildProcessError(ctx, "codex", err)
 		if err == nil {
 			verifyOutput, verifyErr := t.runBuildVerification(ctx, workspace, output, buildStartedAt, !retrying)
 			output = appendVerificationOutput(output, verifyOutput)
@@ -160,12 +162,14 @@ func (t *buildFeatureTool) runCodex(req *FeatureRequest, retrying bool, workspac
 		if err == nil {
 			req.Status = StatusCompleted
 			req.BuildLog += "\n\nBuild completed successfully."
+			req.BuildLog += fmt.Sprintf("\nBuild duration: %s", time.Since(buildStartedAt).Round(time.Second))
 			slog.Info("beta feature_requests: codex completed",
 				"feature_id", req.ID, "title", req.Title, "attempt", attempt, "attempts", attempts)
 			break
 		}
 
 		req.BuildLog += fmt.Sprintf("\n\nBuild failed: %v", err)
+		req.BuildLog += fmt.Sprintf("\nAttempt duration: %s", time.Since(attemptStartedAt).Round(time.Second))
 		summary := summarizeBuildFailure(output, err)
 
 		slog.Warn("beta feature_requests: codex failed",
@@ -346,6 +350,11 @@ func shouldAutoRepairBuildFailure(output string, runErr error) bool {
 	case strings.Contains(combined, "context deadline exceeded"),
 		strings.Contains(combined, "deadline exceeded"),
 		strings.Contains(combined, "timed out"),
+		strings.Contains(combined, "signal: killed"),
+		strings.Contains(combined, "terminated by signal"),
+		strings.Contains(combined, "subprocess was killed"),
+		strings.Contains(combined, "failed to record rollout items"),
+		strings.Contains(combined, "channel closed"),
 		strings.Contains(combined, "quota"),
 		strings.Contains(combined, "rate limit"),
 		strings.Contains(combined, "not authenticated"),
@@ -363,6 +372,43 @@ func shouldAutoRepairBuildFailure(output string, runErr error) bool {
 	default:
 		return true
 	}
+}
+
+func describeBuildProcessError(ctx context.Context, label string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = "subprocess"
+	}
+
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return fmt.Errorf("%s timed out after %s and the subprocess was killed", label, buildTimeout)
+	case errors.Is(ctx.Err(), context.Canceled):
+		return fmt.Errorf("%s was canceled and the subprocess was killed", label)
+	}
+
+	lowerErr := strings.ToLower(strings.TrimSpace(err.Error()))
+	if strings.Contains(lowerErr, "signal: killed") {
+		return fmt.Errorf("%s terminated by signal: killed", label)
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ProcessState != nil {
+		state := strings.TrimSpace(exitErr.ProcessState.String())
+		if state == "" {
+			return err
+		}
+		lowerState := strings.ToLower(state)
+		if strings.Contains(lowerState, "signal:") {
+			return fmt.Errorf("%s terminated by %s", label, state)
+		}
+	}
+
+	return err
 }
 
 func summarizeBuildFailure(output string, runErr error) string {
@@ -533,6 +579,7 @@ func buildFollowupMessage(req *FeatureRequest, retrying bool, summary string) st
 	b.WriteString("2. Then send the chat a concise update explaining what happened and what should happen next.\n")
 	if req.Status == StatusCompleted {
 		b.WriteString("Do not claim success unless feature_detail confirms the implementation and verification actually passed.\n")
+		b.WriteString("If the build really succeeded and the feature should be turned on now, you may call activate_beta_feature and any feature-specific configure/run tools that are available in this gateway.\n")
 	} else if retrying {
 		b.WriteString("This was already a retry. Do not automatically call build_feature again from this follow-up turn unless the log shows a single clear, bounded next attempt is warranted.\n")
 	} else {

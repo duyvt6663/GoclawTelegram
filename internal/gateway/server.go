@@ -368,8 +368,16 @@ func clientIP(r *http.Request) string {
 func (s *Server) Router() *MethodRouter { return s.router }
 
 // AddRouteRegistrar adds an HTTP route registrar (e.g., from beta features).
-// Must be called before BuildMux().
-func (s *Server) AddRouteRegistrar(r RouteRegistrar) { s.handlers = append(s.handlers, r) }
+// If the mux has already been built, routes are registered immediately too.
+func (s *Server) AddRouteRegistrar(r RouteRegistrar) {
+	if r == nil {
+		return
+	}
+	s.handlers = append(s.handlers, r)
+	if s.mux != nil {
+		r.RegisterRoutes(s.mux)
+	}
+}
 
 // SetPolicyEngine sets the permission policy engine for RPC method authorization.
 func (s *Server) SetPolicyEngine(pe *permissions.PolicyEngine) { s.policyEngine = pe }

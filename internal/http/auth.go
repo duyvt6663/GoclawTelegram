@@ -377,6 +377,12 @@ func requireAuth(minRole permissions.Role, next http.HandlerFunc) http.HandlerFu
 	}
 }
 
+// RequireAuth exposes the shared HTTP auth middleware so beta features can
+// register isolated routes without reimplementing gateway auth.
+func RequireAuth(minRole permissions.Role, next http.HandlerFunc) http.HandlerFunc {
+	return requireAuth(minRole, next)
+}
+
 // requireAuthBearer is like requireAuth but accepts a pre-extracted bearer token.
 // Used by handlers that accept tokens from query params (files, media).
 // Returns the authenticated request with user context applied (owner_id enforcement included).

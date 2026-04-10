@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/nextlevelbuilder/goclaw/internal/beta"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
@@ -317,6 +318,54 @@ func TestCodexBuildArgsUsesNonInteractiveFullAutoExec(t *testing.T) {
 	}
 }
 
+func TestBuildTimeoutIsTwoHours(t *testing.T) {
+	if buildTimeout != 2*time.Hour {
+		t.Fatalf("buildTimeout = %s, want %s", buildTimeout, 2*time.Hour)
+	}
+}
+
+func TestActivateBetaFeatureToolEnablesAndHotActivatesFeature(t *testing.T) {
+	t.Cleanup(func() { beta.ShutdownAll(context.Background()) })
+
+	featureName := "test_activate_beta_feature_tool"
+	beta.Register(&testActivatableBetaFeature{name: featureName})
+
+	feature := newTestFeatureFeature(t)
+	sysConfigs := newFeatureTestSystemConfigStore()
+	feature.sysConfigs = sysConfigs
+	feature.betaDeps = beta.Deps{}
+
+	tool := &activateBetaFeatureTool{feature: feature}
+	ctx := store.WithTenantID(context.Background(), store.MasterTenantID)
+
+	result := tool.Execute(ctx, map[string]any{"feature_name": featureName})
+	if result.IsError {
+		t.Fatalf("Execute() error = %s", result.ForLLM)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(result.ForLLM), &payload); err != nil {
+		t.Fatalf("unmarshal result JSON: %v", err)
+	}
+	if payload["enabled"] != true {
+		t.Fatalf("enabled = %v, want true", payload["enabled"])
+	}
+	if payload["runtime_active"] != true {
+		t.Fatalf("runtime_active = %v, want true", payload["runtime_active"])
+	}
+	if payload["hot_activated"] != true {
+		t.Fatalf("hot_activated = %v, want true", payload["hot_activated"])
+	}
+
+	value, err := sysConfigs.Get(ctx, "beta."+featureName)
+	if err != nil {
+		t.Fatalf("Get(system config) error = %v", err)
+	}
+	if value != "true" {
+		t.Fatalf("system config value = %q, want %q", value, "true")
+	}
+}
+
 func TestResolveBuildWorkspaceCandidatesPrefersGoClawCheckout(t *testing.T) {
 	invalid := t.TempDir()
 	repoRoot := newTestBuildRepo(t)
@@ -455,6 +504,12 @@ func TestShouldAutoRepairBuildFailureClassifiesRepoAndCLIProblems(t *testing.T) 
 	if shouldAutoRepairBuildFailure("sandbox-exec: sandbox_apply: Operation not permitted", fmt.Errorf("exit status 1")) {
 		t.Fatal("expected sandbox startup failure to be non-repairable by the inner loop")
 	}
+	if shouldAutoRepairBuildFailure("failed to record rollout items: failed to queue rollout items: channel closed", fmt.Errorf("signal: killed")) {
+		t.Fatal("expected rollout channel closure to be non-repairable by the inner loop")
+	}
+	if shouldAutoRepairBuildFailure("", fmt.Errorf("codex terminated by signal: killed")) {
+		t.Fatal("expected signal-killed codex run to be non-repairable by the inner loop")
+	}
 }
 
 func TestBuildRepairPromptAllowsSharedCodeFixes(t *testing.T) {
@@ -470,6 +525,32 @@ func TestBuildRepairPromptAllowsSharedCodeFixes(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "undefined helperX") {
 		t.Fatalf("buildRepairPrompt() = %q, want previous failure summary", prompt)
+	}
+}
+
+func TestDescribeBuildProcessErrorExplainsTimeoutKill(t *testing.T) {
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	err := describeBuildProcessError(ctx, "codex", context.DeadlineExceeded)
+	if err == nil {
+		t.Fatal("describeBuildProcessError() returned nil")
+	}
+	if !strings.Contains(err.Error(), "timed out after 2h0m0s") {
+		t.Fatalf("timeout error = %q, want timeout detail", err.Error())
+	}
+	if !strings.Contains(err.Error(), "subprocess was killed") {
+		t.Fatalf("timeout error = %q, want kill detail", err.Error())
+	}
+}
+
+func TestDescribeBuildProcessErrorExplainsSignalKill(t *testing.T) {
+	err := describeBuildProcessError(context.Background(), "codex", fmt.Errorf("signal: killed"))
+	if err == nil {
+		t.Fatal("describeBuildProcessError() returned nil")
+	}
+	if got := err.Error(); got != "codex terminated by signal: killed" {
+		t.Fatalf("signal kill error = %q, want %q", got, "codex terminated by signal: killed")
 	}
 }
 
@@ -780,4 +861,53 @@ func (s *stubTelegramPollCreator) CreateSoDauBaiPoll(_ context.Context, chatID i
 		return "", 0, s.err
 	}
 	return s.pollID, s.messageID, nil
+}
+
+type testActivatableBetaFeature struct {
+	name string
+}
+
+func (f *testActivatableBetaFeature) Name() string { return f.name }
+
+func (f *testActivatableBetaFeature) Init(beta.Deps) error { return nil }
+
+type featureTestSystemConfigStore struct {
+	values map[string]string
+}
+
+func newFeatureTestSystemConfigStore() *featureTestSystemConfigStore {
+	return &featureTestSystemConfigStore{values: make(map[string]string)}
+}
+
+func (s *featureTestSystemConfigStore) Get(ctx context.Context, key string) (string, error) {
+	value, ok := s.values[s.scopedKey(ctx, key)]
+	if !ok {
+		return "", fmt.Errorf("not found")
+	}
+	return value, nil
+}
+
+func (s *featureTestSystemConfigStore) Set(ctx context.Context, key, value string) error {
+	s.values[s.scopedKey(ctx, key)] = value
+	return nil
+}
+
+func (s *featureTestSystemConfigStore) Delete(ctx context.Context, key string) error {
+	delete(s.values, s.scopedKey(ctx, key))
+	return nil
+}
+
+func (s *featureTestSystemConfigStore) List(ctx context.Context) (map[string]string, error) {
+	result := make(map[string]string)
+	prefix := s.scopedKey(ctx, "")
+	for scopedKey, value := range s.values {
+		if strings.HasPrefix(scopedKey, prefix) {
+			result[strings.TrimPrefix(scopedKey, prefix)] = value
+		}
+	}
+	return result, nil
+}
+
+func (s *featureTestSystemConfigStore) scopedKey(ctx context.Context, key string) string {
+	return store.TenantIDFromContext(ctx).String() + ":" + key
 }

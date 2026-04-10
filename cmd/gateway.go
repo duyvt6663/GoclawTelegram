@@ -1164,7 +1164,7 @@ func runGateway() {
 
 	// Activate beta features (flag-gated, registered via init() blank imports).
 	betaFlags := beta.NewFlagSource(pgStores.SystemConfigs)
-	betaShutdowns := beta.ActivateAll(ctx, betaFlags, beta.Deps{
+	betaDeps := beta.Deps{
 		Config:         cfg,
 		Stores:         pgStores,
 		ToolRegistry:   toolsReg,
@@ -1174,12 +1174,27 @@ func runGateway() {
 		ChannelManager: channelMgr,
 		Workspace:      workspace,
 		DataDir:        dataDir,
-	})
-	defer func() {
-		for _, s := range betaShutdowns {
-			s.Shutdown(context.Background())
-		}
-	}()
+	}
+	betaStartupCtx := store.WithTenantID(ctx, store.MasterTenantID)
+	beta.ActivateAll(betaStartupCtx, betaFlags, betaDeps)
+	defer beta.ShutdownAll(context.Background())
+
+	if pgStores.SystemConfigs != nil {
+		msgBus.Subscribe("beta-hot-activate", func(evt bus.Event) {
+			if evt.Name != bus.TopicSystemConfigChanged {
+				return
+			}
+			activateCtx := context.Background()
+			if reqCtx, ok := evt.Payload.(context.Context); ok {
+				activateCtx = reqCtx
+			} else {
+				activateCtx = store.WithTenantID(activateCtx, store.MasterTenantID)
+			}
+			if activated := beta.ActivatePending(activateCtx, betaFlags, betaDeps); len(activated) > 0 {
+				slog.Info("beta features hot-activated via system_configs", "features", activated)
+			}
+		})
+	}
 
 	slog.Info("goclaw gateway starting",
 		"version", Version,

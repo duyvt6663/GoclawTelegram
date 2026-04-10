@@ -10,6 +10,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/beta"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
 const approvalThreshold = 5
@@ -22,10 +23,12 @@ type TelegramPollCreator interface {
 
 // FeatureRequestsFeature manages user-requested beta features via Telegram.
 type FeatureRequestsFeature struct {
-	store   *featureStore
-	msgBus  *bus.MessageBus
-	resolve func(channel string) TelegramPollCreator
-	mu      sync.Mutex
+	store      *featureStore
+	msgBus     *bus.MessageBus
+	sysConfigs store.SystemConfigStore
+	betaDeps   beta.Deps
+	resolve    func(channel string) TelegramPollCreator
+	mu         sync.Mutex
 }
 
 func (f *FeatureRequestsFeature) Name() string { return "feature_requests" }
@@ -37,6 +40,10 @@ func (f *FeatureRequestsFeature) Init(deps beta.Deps) error {
 
 	f.store = &featureStore{db: deps.Stores.DB}
 	f.msgBus = deps.MessageBus
+	f.betaDeps = deps
+	if deps.Stores != nil {
+		f.sysConfigs = deps.Stores.SystemConfigs
+	}
 
 	if err := f.store.migrate(); err != nil {
 		return fmt.Errorf("feature_requests migration: %w", err)
@@ -72,6 +79,7 @@ func (f *FeatureRequestsFeature) Init(deps beta.Deps) error {
 	deps.ToolRegistry.Register(&featureDetailTool{feature: f})
 	deps.ToolRegistry.Register(&featurePollTool{feature: f})
 	deps.ToolRegistry.Register(&buildFeatureTool{feature: f, workspace: buildWorkspace})
+	deps.ToolRegistry.Register(&activateBetaFeatureTool{feature: f})
 
 	slog.Info("beta feature_requests: tools registered, poll handler active")
 	return nil

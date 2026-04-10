@@ -145,7 +145,7 @@ func (c *Channel) SyncMenuCommands(ctx context.Context, commands []telego.BotCom
 
 // DefaultMenuCommands returns the default bot menu commands.
 func DefaultMenuCommands() []telego.BotCommand {
-	return []telego.BotCommand{
+	commands := []telego.BotCommand{
 		{Command: "start", Description: "Start chatting with the bot"},
 		{Command: "help", Description: "Show available commands"},
 		{Command: "stop", Description: "Stop current running task"},
@@ -160,4 +160,6 @@ func DefaultMenuCommands() []telego.BotCommand {
 		{Command: "addwriter", Description: "Add a file writer (reply to their message)"},
 		{Command: "removewriter", Description: "Remove a file writer (reply to their message)"},
 	}
+	commands = append(commands, RegisteredMenuCommands()...)
+	return commands
 }

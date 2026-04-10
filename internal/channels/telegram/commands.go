@@ -72,6 +72,27 @@ func (c *Channel) handleBotCommand(ctx context.Context, message *telego.Message,
 		}
 	}
 
+	reply := func(ctx context.Context, text string) {
+		if strings.TrimSpace(text) == "" {
+			return
+		}
+		meta := map[string]string{}
+		if localKey != "" && localKey != chatIDStr {
+			meta["local_key"] = localKey
+		}
+		if messageThreadID > 0 {
+			meta["message_thread_id"] = fmt.Sprintf("%d", messageThreadID)
+		}
+		if err := c.Send(ctx, bus.OutboundMessage{
+			Channel:  c.Name(),
+			ChatID:   chatIDStr,
+			Content:  text,
+			Metadata: meta,
+		}); err != nil {
+			slog.Warn("telegram dynamic command reply failed", "command", cmd, "error", err)
+		}
+	}
+
 	switch cmd {
 	case "/start":
 		// Don't intercept /start — let it pass through to agent loop.
@@ -228,6 +249,20 @@ func (c *Channel) handleBotCommand(ctx context.Context, message *telego.Message,
 		return true
 	}
 
+	if DispatchDynamicCommand(ctx, c, cmd, DynamicCommandContext{
+		Command:         cmd,
+		Text:            text,
+		ChatID:          chatID,
+		ChatIDStr:       chatIDStr,
+		LocalKey:        localKey,
+		SenderID:        senderID,
+		IsGroup:         isGroup,
+		IsForum:         isForum,
+		MessageThreadID: messageThreadID,
+		Reply:           reply,
+	}) {
+		return true
+	}
+
 	return false
 }
-

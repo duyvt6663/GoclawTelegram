@@ -23,10 +23,22 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 	})
 }
 
+// WriteError exposes the standard HTTP error envelope for beta features and
+// other internal extension points that register their own handlers.
+func WriteError(w http.ResponseWriter, status int, code, msg string) {
+	writeError(w, status, code, msg)
+}
+
 // writeJSON writes a JSON response with the given status code.
 // Used for success responses and legacy error responses during migration.
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+// WriteJSON exposes the shared JSON response helper for beta features and
+// other internal extension points that register their own handlers.
+func WriteJSON(w http.ResponseWriter, status int, data any) {
+	writeJSON(w, status, data)
 }
