@@ -91,3 +91,4 @@ compose.d/*
 .gocache/
 .local-stickers/
 */__pycache__/
+builder-bot/*

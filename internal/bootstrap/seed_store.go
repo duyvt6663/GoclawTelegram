@@ -166,17 +166,15 @@ func SeedUserFiles(ctx context.Context, agentStore store.AgentStore, agentID uui
 
 	// For predefined agents: load agent-level files once to use as seed fallback.
 	// USER.md at agent-level may contain a pre-configured owner profile (e.g. set by
-	// the wizard or management dashboard). Use it as the per-user seed instead of the
-	// blank embedded template so the agent starts with the correct owner context.
+	// the wizard or management dashboard). BOOTSTRAP.md may also be overridden at the
+	// agent level, including empty content to suppress first-run onboarding entirely.
 	var agentLevelFiles map[string]string
 	if agentType == store.AgentTypePredefined {
 		agentFiles, err := agentStore.GetAgentContextFiles(ctx, agentID)
 		if err == nil && len(agentFiles) > 0 {
 			agentLevelFiles = make(map[string]string, len(agentFiles))
 			for _, f := range agentFiles {
-				if f.Content != "" {
-					agentLevelFiles[f.FileName] = f.Content
-				}
+				agentLevelFiles[f.FileName] = f.Content
 			}
 		}
 	}
@@ -187,9 +185,10 @@ func SeedUserFiles(ctx context.Context, agentStore store.AgentStore, agentID uui
 			continue // already has personalized content, don't overwrite
 		}
 
-		// For predefined agents seeding USER.md: prefer agent-level content as seed.
-		// This propagates wizard/dashboard-configured owner profile to the first user.
-		if agentType == store.AgentTypePredefined && name == UserFile {
+		// For predefined agents seeding per-user files: prefer agent-level content as seed.
+		// This propagates wizard/dashboard-configured USER.md and allows per-agent
+		// BOOTSTRAP.md overrides, including empty content to suppress onboarding.
+		if agentType == store.AgentTypePredefined {
 			if agentContent, ok := agentLevelFiles[name]; ok {
 				if err := retryOnBusy(func() error { return agentStore.SetUserContextFile(ctx, agentID, userID, name, agentContent) }); err != nil {
 					return seeded, err
@@ -197,7 +196,7 @@ func SeedUserFiles(ctx context.Context, agentStore store.AgentStore, agentID uui
 				seeded = append(seeded, name)
 				continue
 			}
-			// No agent-level USER.md → fall through to blank embedded template
+			// No agent-level override → fall through to embedded template.
 		}
 
 		// Predefined agents use a user-focused bootstrap template

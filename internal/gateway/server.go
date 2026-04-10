@@ -29,8 +29,9 @@ import (
 )
 
 // Server is the main gateway server handling WebSocket and HTTP connections.
-// routeRegistrar is implemented by all HTTP API handlers that register routes on a mux.
-type routeRegistrar interface {
+
+// RouteRegistrar is implemented by all HTTP API handlers that register routes on a mux.
+type RouteRegistrar interface {
 	RegisterRoutes(mux *http.ServeMux)
 }
 
@@ -42,9 +43,9 @@ type Server struct {
 	tools    *tools.Registry
 	router   *MethodRouter
 
-	// HTTP API handlers — all implement routeRegistrar.
+	// HTTP API handlers — all implement RouteRegistrar.
 	// Registered via Set*Handler() setters, routes added in BuildMux() via single loop.
-	handlers []routeRegistrar
+	handlers []RouteRegistrar
 
 	// Non-handler dependencies (don't implement RegisterRoutes)
 	policyEngine   *permissions.PolicyEngine
@@ -365,6 +366,10 @@ func clientIP(r *http.Request) string {
 
 // Router returns the method router for registering additional handlers.
 func (s *Server) Router() *MethodRouter { return s.router }
+
+// AddRouteRegistrar adds an HTTP route registrar (e.g., from beta features).
+// Must be called before BuildMux().
+func (s *Server) AddRouteRegistrar(r RouteRegistrar) { s.handlers = append(s.handlers, r) }
 
 // SetPolicyEngine sets the permission policy engine for RPC method authorization.
 func (s *Server) SetPolicyEngine(pe *permissions.PolicyEngine) { s.policyEngine = pe }

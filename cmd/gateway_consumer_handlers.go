@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
+	featurerequests "github.com/nextlevelbuilder/goclaw/internal/beta/feature_requests"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/safego"
@@ -20,6 +22,114 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
+
+// handleFeatureBuildFollowup processes feature build completion hooks: bypass debounce,
+// resume the builder agent on the same session/topic, and let it inspect feature_detail
+// before posting a user-facing follow-up message.
+func handleFeatureBuildFollowup(
+	ctx context.Context,
+	msg bus.InboundMessage,
+	deps *ConsumerDeps,
+) bool {
+	if !(msg.Channel == tools.ChannelSystem && featurerequests.IsBuildFollowupSender(msg.SenderID)) {
+		return false
+	}
+
+	if msg.TenantID != uuid.Nil {
+		ctx = store.WithTenantID(ctx, msg.TenantID)
+	} else {
+		ctx = store.WithTenantID(ctx, store.MasterTenantID)
+	}
+
+	origChannel := msg.Metadata[tools.MetaOriginChannel]
+	origPeerKind := msg.Metadata[tools.MetaOriginPeerKind]
+	origLocalKey := msg.Metadata[tools.MetaOriginLocalKey]
+	agentKey := strings.TrimSpace(msg.AgentID)
+	if origChannel == "" || msg.ChatID == "" || agentKey == "" {
+		slog.Warn("feature build follow-up: missing routing",
+			"sender", msg.SenderID, "agent", agentKey, "origin_channel", origChannel, "chat_id", msg.ChatID)
+		return true
+	}
+	if origPeerKind == "" {
+		origPeerKind = string(sessions.PeerDirect)
+	}
+
+	sessionKey := strings.TrimSpace(msg.Metadata[tools.MetaOriginSessionKey])
+	if sessionKey == "" {
+		sessionKey = sessions.BuildScopedSessionKey(agentKey, origChannel, sessions.PeerKind(origPeerKind), msg.ChatID)
+		sessionKey = overrideSessionKeyFromLocalKey(sessionKey, origLocalKey, agentKey, origChannel, msg.ChatID, origPeerKind)
+	}
+
+	userID := strings.TrimSpace(msg.UserID)
+	if userID == "" {
+		userID = strings.TrimSpace(msg.Metadata[tools.MetaOriginUserID])
+	}
+	if userID == "" && origPeerKind == string(sessions.PeerGroup) && msg.ChatID != "" {
+		userID = fmt.Sprintf("group:%s:%s", origChannel, msg.ChatID)
+	}
+
+	outMeta := buildAnnounceOutMeta(origLocalKey)
+	req := agent.RunRequest{
+		SessionKey:  sessionKey,
+		Message:     msg.Content,
+		Channel:     origChannel,
+		ChannelType: resolveChannelType(deps.ChannelMgr, origChannel),
+		ChatID:      msg.ChatID,
+		PeerKind:    origPeerKind,
+		LocalKey:    origLocalKey,
+		UserID:      userID,
+		RunID:       fmt.Sprintf("feature-build-followup-%s", uuid.NewString()[:8]),
+		RunKind:     "announce",
+		HideInput:   true,
+		Stream:      false,
+	}
+
+	outCh := deps.Sched.Schedule(ctx, scheduler.LaneSubagent, req)
+
+	deps.BgWg.Add(1)
+	go func() {
+		defer deps.BgWg.Done()
+		defer safego.Recover(nil, "component", "feature_build_followup", "session", sessionKey)
+
+		outcome := <-outCh
+		if outcome.Err != nil {
+			if !errors.Is(outcome.Err, context.Canceled) {
+				slog.Error("feature build follow-up: agent run failed", "error", outcome.Err, "session", sessionKey)
+				deps.MsgBus.PublishOutbound(bus.OutboundMessage{
+					Channel:  origChannel,
+					ChatID:   msg.ChatID,
+					Content:  formatAgentError(outcome.Err),
+					Metadata: outMeta,
+				})
+			}
+			return
+		}
+		if outcome.Result == nil {
+			slog.Warn("feature build follow-up: nil result", "session", sessionKey)
+			return
+		}
+
+		isSilent := outcome.Result.Content == "" || agent.IsSilentReply(outcome.Result.Content)
+		if isSilent && len(outcome.Result.Media) == 0 {
+			return
+		}
+
+		out := outcome.Result.Content
+		if isSilent {
+			out = ""
+		}
+		outMsg := bus.OutboundMessage{
+			Channel:  origChannel,
+			ChatID:   msg.ChatID,
+			Content:  out,
+			Metadata: outMeta,
+		}
+		appendMediaToOutbound(&outMsg, outcome.Result.Media)
+		deps.MsgBus.PublishOutbound(outMsg)
+	}()
+
+	return true
+}
 
 // handleSubagentAnnounce processes subagent announce messages: bypass debounce,
 // inject into parent agent session (matching TS subagent-announce.ts pattern).

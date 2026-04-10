@@ -186,6 +186,38 @@ func TestSeedUserFiles_PredefinedAgent_FallsBackToTemplateWhenNoAgentLevelUserMD
 	}
 }
 
+func TestSeedUserFiles_PredefinedAgent_UsesAgentLevelBootstrapOverride(t *testing.T) {
+	as := newSeedStub()
+	agentID := uuid.New()
+	bootstrapContent := ""
+
+	// Empty BOOTSTRAP.md at agent level disables first-run onboarding for this agent.
+	as.agentFiles[BootstrapFile] = bootstrapContent
+
+	seeded, err := SeedUserFiles(context.Background(), as, agentID, "user-bootstrapless", store.AgentTypePredefined, false)
+	if err != nil {
+		t.Fatalf("SeedUserFiles returned error: %v", err)
+	}
+
+	foundBootstrap := false
+	for _, f := range seeded {
+		if f == BootstrapFile {
+			foundBootstrap = true
+		}
+	}
+	if !foundBootstrap {
+		t.Fatalf("BOOTSTRAP.md not in seeded files list: %v", seeded)
+	}
+
+	got, ok := as.seededUserFiles[BootstrapFile]
+	if !ok {
+		t.Fatal("BOOTSTRAP.md was not written to user_context_files")
+	}
+	if got != bootstrapContent {
+		t.Fatalf("seeded BOOTSTRAP.md content mismatch: want %q, got %q", bootstrapContent, got)
+	}
+}
+
 // TestSeedUserFiles_PredefinedAgent_DoesNotOverwriteExistingPerUserContent verifies
 // that personalized per-user USER.md written via conversation is never overwritten.
 func TestSeedUserFiles_PredefinedAgent_DoesNotOverwriteExistingPerUserContent(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/sodaubai"
 )
 
@@ -42,12 +43,28 @@ func (c *Channel) CreateSoDauBaiPoll(ctx context.Context, chatID int64, threadID
 }
 
 func (c *Channel) handlePollAnswer(ctx context.Context, answer *telego.PollAnswer) {
-	if c == nil || c.soDauBaiPolls == nil || answer == nil {
+	if c == nil || answer == nil {
 		return
 	}
 
 	voterID := resolvePollVoterID(answer)
 	if voterID == "" {
+		return
+	}
+
+	// Broadcast poll answer to all bus subscribers (beta features, extensions, etc.)
+	c.Bus().Broadcast(bus.Event{
+		Name:     bus.TopicTelegramPollAnswer,
+		TenantID: c.TenantID(),
+		Payload: map[string]any{
+			"poll_id":    answer.PollID,
+			"voter_id":   voterID,
+			"option_ids": answer.OptionIDs,
+			"channel":    c.Name(),
+		},
+	})
+
+	if c.soDauBaiPolls == nil {
 		return
 	}
 
@@ -74,7 +91,20 @@ func (c *Channel) handlePollAnswer(ctx context.Context, answer *telego.PollAnswe
 }
 
 func (c *Channel) handlePollUpdate(_ context.Context, poll *telego.Poll) {
-	if c == nil || c.soDauBaiPolls == nil || poll == nil || !poll.IsClosed {
+	if c == nil || poll == nil || !poll.IsClosed {
+		return
+	}
+
+	c.Bus().Broadcast(bus.Event{
+		Name:     bus.TopicTelegramPollClosed,
+		TenantID: c.TenantID(),
+		Payload: map[string]any{
+			"poll_id": poll.ID,
+			"channel": c.Name(),
+		},
+	})
+
+	if c.soDauBaiPolls == nil {
 		return
 	}
 	if _, err := c.soDauBaiPolls.MarkClosed(poll.ID); err != nil {

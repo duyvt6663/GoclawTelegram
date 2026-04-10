@@ -14,6 +14,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
+	"github.com/nextlevelbuilder/goclaw/internal/beta"
+	_ "github.com/nextlevelbuilder/goclaw/internal/beta/all"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/cache"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
@@ -1158,6 +1160,25 @@ func runGateway() {
 		}
 
 		cancel()
+	}()
+
+	// Activate beta features (flag-gated, registered via init() blank imports).
+	betaFlags := beta.NewFlagSource(pgStores.SystemConfigs)
+	betaShutdowns := beta.ActivateAll(ctx, betaFlags, beta.Deps{
+		Config:         cfg,
+		Stores:         pgStores,
+		ToolRegistry:   toolsReg,
+		MethodRouter:   server.Router(),
+		Server:         server,
+		MessageBus:     msgBus,
+		ChannelManager: channelMgr,
+		Workspace:      workspace,
+		DataDir:        dataDir,
+	})
+	defer func() {
+		for _, s := range betaShutdowns {
+			s.Shutdown(context.Background())
+		}
 	}()
 
 	slog.Info("goclaw gateway starting",

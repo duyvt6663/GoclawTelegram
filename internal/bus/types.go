@@ -50,7 +50,7 @@ type MediaAttachment struct {
 
 // Event represents a server-side event to broadcast to WebSocket clients.
 type Event struct {
-	Name     string    `json:"name"`              // event name (e.g. "agent", "chat", "health")
+	Name     string    `json:"name"` // event name (e.g. "agent", "chat", "health")
 	Payload  any       `json:"payload,omitempty"`
 	TenantID uuid.UUID `json:"-"` // tenant scope for event filtering (not serialized to clients)
 }
@@ -100,6 +100,8 @@ const (
 	TopicPairingRevoked        = "pairing:revoked"
 	TopicAgentStatusChanged    = "agent:status_changed"
 	TopicAgentDeleted          = "agent:deleted"
+	TopicTelegramPollAnswer    = "telegram:poll_answer"
+	TopicTelegramPollClosed    = "telegram:poll_closed"
 )
 
 // EventPairingRevoked is the event name broadcast when a paired device is revoked.
