@@ -69,6 +69,7 @@ func handleFeatureBuildFollowup(
 	}
 
 	outMeta := buildAnnounceOutMeta(origLocalKey)
+	persistFeatureBuildFollowupMessage(ctx, deps.SessStore, sessionKey, msg.Content)
 	req := agent.RunRequest{
 		SessionKey:  sessionKey,
 		Message:     msg.Content,
@@ -129,6 +130,19 @@ func handleFeatureBuildFollowup(
 	}()
 
 	return true
+}
+
+func persistFeatureBuildFollowupMessage(ctx context.Context, sessStore store.SessionStore, sessionKey, content string) {
+	if sessStore == nil || strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(content) == "" {
+		return
+	}
+	sessStore.AddMessage(ctx, sessionKey, providers.Message{
+		Role:    "user",
+		Content: content,
+	})
+	if err := sessStore.Save(ctx, sessionKey); err != nil {
+		slog.Warn("feature build follow-up: failed to persist hook message", "session", sessionKey, "error", err)
+	}
 }
 
 // handleSubagentAnnounce processes subagent announce messages: bypass debounce,

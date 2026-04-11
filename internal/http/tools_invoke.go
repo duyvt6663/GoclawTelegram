@@ -2,11 +2,14 @@ package http
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/i18n"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
+	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
@@ -32,6 +35,7 @@ type toolsInvokeRequest struct {
 	Action     string         `json:"action,omitempty"`
 	Args       map[string]any `json:"args"`
 	SessionKey string         `json:"sessionKey,omitempty"`
+	LocalKey   string         `json:"localKey,omitempty"`
 	AgentID    string         `json:"agentId,omitempty"`
 	DryRun     bool           `json:"dryRun,omitempty"`
 	Channel    string         `json:"channel,omitempty"`  // tool context: channel name
@@ -99,10 +103,14 @@ func (h *ToolsInvokeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if agentIDStr == "" {
 		agentIDStr = extractAgentID(r, "")
 	}
-	if agentIDStr != "" && h.agentStore != nil {
-		ag, err := h.agentStore.GetByKey(ctx, agentIDStr)
-		if err == nil {
-			ctx = store.WithAgentID(ctx, ag.ID)
+	if agentIDStr != "" {
+		ctx = tools.WithToolAgentKey(ctx, agentIDStr)
+		ctx = store.WithAgentKey(ctx, agentIDStr)
+		if h.agentStore != nil {
+			ag, err := h.agentStore.GetByKey(ctx, agentIDStr)
+			if err == nil {
+				ctx = store.WithAgentID(ctx, ag.ID)
+			}
 		}
 	}
 
@@ -115,6 +123,13 @@ func (h *ToolsInvokeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.PeerKind != "" {
 		ctx = tools.WithToolPeerKind(ctx, req.PeerKind)
+	}
+	if req.LocalKey != "" {
+		ctx = tools.WithToolLocalKey(ctx, req.LocalKey)
+	}
+	sessionKey := strings.TrimSpace(req.SessionKey)
+	if sessionKey == "" {
+		sessionKey = deriveToolSessionKey(agentIDStr, req.Channel, req.ChatID, req.PeerKind, req.LocalKey)
 	}
 	if h.builtinToolStore != nil {
 		if def, err := h.builtinToolStore.Get(ctx, req.Tool); err == nil && len(def.Settings) > 0 {
@@ -135,7 +150,20 @@ func (h *ToolsInvokeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		args["action"] = req.Action
 	}
 
-	result := h.registry.ExecuteWithContext(ctx, req.Tool, args, "http", "api", "direct", "", nil)
+	execChannel := req.Channel
+	if execChannel == "" {
+		execChannel = "http"
+	}
+	execChatID := req.ChatID
+	if execChatID == "" {
+		execChatID = "api"
+	}
+	execPeerKind := req.PeerKind
+	if execPeerKind == "" {
+		execPeerKind = "direct"
+	}
+
+	result := h.registry.ExecuteWithContext(ctx, req.Tool, args, execChannel, execChatID, execPeerKind, sessionKey, nil)
 
 	if result.IsError {
 		writeToolError(w, http.StatusBadRequest, "TOOL_ERROR", result.ForLLM)
@@ -150,6 +178,36 @@ func (h *ToolsInvokeHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"metadata": map[string]any{},
 		},
 	})
+}
+
+func deriveToolSessionKey(agentID, channel, chatID, peerKind, localKey string) string {
+	agentID = strings.TrimSpace(agentID)
+	channel = strings.TrimSpace(channel)
+	chatID = strings.TrimSpace(chatID)
+	peerKind = strings.TrimSpace(peerKind)
+	localKey = strings.TrimSpace(localKey)
+	if agentID == "" || channel == "" || chatID == "" || peerKind == "" {
+		return ""
+	}
+
+	sessionKey := sessions.BuildScopedSessionKey(agentID, channel, sessions.PeerKind(peerKind), chatID)
+	if localKey == "" {
+		return sessionKey
+	}
+	if idx := strings.Index(localKey, ":topic:"); idx > 0 && peerKind == string(sessions.PeerGroup) {
+		var topicID int
+		fmt.Sscanf(localKey[idx+7:], "%d", &topicID)
+		if topicID > 0 {
+			return sessions.BuildGroupTopicSessionKey(agentID, channel, chatID, topicID)
+		}
+	} else if idx := strings.Index(localKey, ":thread:"); idx > 0 && peerKind == string(sessions.PeerDirect) {
+		var threadID int
+		fmt.Sscanf(localKey[idx+8:], "%d", &threadID)
+		if threadID > 0 {
+			return sessions.BuildDMThreadSessionKey(agentID, channel, chatID, threadID)
+		}
+	}
+	return sessionKey
 }
 
 func writeToolError(w http.ResponseWriter, status int, code, message string) {

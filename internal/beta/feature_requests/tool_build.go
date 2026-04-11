@@ -10,12 +10,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
+	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
@@ -30,10 +33,17 @@ const (
 
 type codexRunner func(ctx context.Context, workspace, prompt string) (string, error)
 type buildVerifier func(ctx context.Context, workspace, output string, buildStartedAt time.Time, requireFreshArtifacts bool) (string, error)
+type buildDeployer func(ctx context.Context, workspace string, req *FeatureRequest, output string, followup *buildFollowupContext) (buildDeployResult, error)
 
 type buildArtifactsManifest struct {
 	FeatureRoot string   `json:"feature_root"`
 	Files       []string `json:"files"`
+}
+
+type buildDeployResult struct {
+	Detail           string
+	FeatureName      string
+	RestartRequested bool
 }
 
 type buildFollowupContext struct {
@@ -59,12 +69,15 @@ func IsBuildFollowupSender(senderID string) bool {
 	return strings.HasPrefix(strings.TrimSpace(senderID), BuildFollowupSenderPrefix)
 }
 
+var featureToolNamePattern = regexp.MustCompile(`Name\(\)\s+string\s*\{\s*return\s+"([^"]+)"\s*\}`)
+
 // buildFeatureTool runs a codex agent to plan and execute a beta feature.
 type buildFeatureTool struct {
 	feature   *FeatureRequestsFeature
 	workspace string
 	runner    codexRunner
 	verifier  buildVerifier
+	deployer  buildDeployer
 	maxTries  int
 }
 
@@ -143,8 +156,9 @@ func (t *buildFeatureTool) runCodex(req *FeatureRequest, retrying bool, workspac
 	attempts := t.buildAttemptLimit()
 
 	var (
-		output string
-		err    error
+		output       string
+		err          error
+		deployResult buildDeployResult
 	)
 
 	for attempt := 1; attempt <= attempts; attempt++ {
@@ -155,6 +169,10 @@ func (t *buildFeatureTool) runCodex(req *FeatureRequest, retrying bool, workspac
 			verifyOutput, verifyErr := t.runBuildVerification(ctx, workspace, output, buildStartedAt, !retrying)
 			output = appendVerificationOutput(output, verifyOutput)
 			err = verifyErr
+		}
+		if err == nil {
+			deployResult, err = t.runBuildDeployment(ctx, workspace, req, output, followup)
+			output = appendDeploymentOutput(output, deployResult.Detail)
 		}
 		output = truncateBuildOutput(output)
 		req.BuildLog += output
@@ -206,7 +224,7 @@ func (t *buildFeatureTool) runCodex(req *FeatureRequest, retrying bool, workspac
 	if req.Channel != "" && req.ChatID != "" {
 		var msg string
 		if req.Status == StatusCompleted {
-			msg = buildSuccessAnnouncement(req.Title, retrying)
+			msg = buildSuccessAnnouncement(req.Title, retrying, deployResult.RestartRequested)
 		} else {
 			msg = buildFailureAnnouncement(req.Title, retrying, summarizeBuildFailure(output, err))
 		}
@@ -214,6 +232,9 @@ func (t *buildFeatureTool) runCodex(req *FeatureRequest, retrying bool, workspac
 	}
 
 	t.enqueueBuildFollowup(req, followup, retrying, summarizeBuildFailure(output, err))
+	if req.Status == StatusCompleted && deployResult.RestartRequested {
+		t.requestGatewayRestart(req, deployResult.FeatureName)
+	}
 }
 
 func (t *buildFeatureTool) announceBuild(req *FeatureRequest, content string) {
@@ -243,6 +264,31 @@ func (t *buildFeatureTool) runBuildVerification(ctx context.Context, workspace, 
 		return t.verifier(ctx, workspace, output, buildStartedAt, requireFreshArtifacts)
 	}
 	return verifyBuildOutput(ctx, workspace, output, buildStartedAt, requireFreshArtifacts)
+}
+
+func (t *buildFeatureTool) runBuildDeployment(ctx context.Context, workspace string, req *FeatureRequest, output string, followup *buildFollowupContext) (buildDeployResult, error) {
+	if t != nil && t.deployer != nil {
+		return t.deployer(ctx, workspace, req, output, followup)
+	}
+	return deployBuiltFeature(ctx, t.feature, workspace, req, output, followup)
+}
+
+func (t *buildFeatureTool) requestGatewayRestart(req *FeatureRequest, featureName string) {
+	if t == nil || t.feature == nil || t.feature.msgBus == nil {
+		return
+	}
+	featureName = normalizeBetaFeatureName(featureName)
+	reason := "auto-deploy rebuilt beta feature"
+	if featureName != "" {
+		reason = fmt.Sprintf("auto-deploy rebuilt beta feature %s", featureName)
+	}
+	if req != nil && strings.TrimSpace(req.ID) != "" {
+		reason += " (" + req.ID + ")"
+	}
+	t.feature.msgBus.Broadcast(bus.Event{
+		Name:    bus.TopicGatewayRestartRequested,
+		Payload: bus.GatewayRestartRequestedPayload{Reason: reason},
+	})
 }
 
 func (t *buildFeatureTool) runCodexPrompt(ctx context.Context, workspace, prompt string) (string, error) {
@@ -311,11 +357,18 @@ func buildStartAnnouncement(title string, retrying bool) string {
 	return fmt.Sprintf("Feature <b>%s</b> build started in the background. I will post another update when it succeeds or fails.", htmlEscape(title))
 }
 
-func buildSuccessAnnouncement(title string, retrying bool) string {
+func buildSuccessAnnouncement(title string, retrying, restarting bool) string {
+	var b strings.Builder
 	if retrying {
-		return fmt.Sprintf("Feature <b>%s</b> retry completed successfully. Use <code>feature_detail</code> to see the build log.", htmlEscape(title))
+		fmt.Fprintf(&b, "Feature <b>%s</b> retry completed successfully.", htmlEscape(title))
+	} else {
+		fmt.Fprintf(&b, "Feature <b>%s</b> has been built successfully.", htmlEscape(title))
 	}
-	return fmt.Sprintf("Feature <b>%s</b> has been built successfully. Use <code>feature_detail</code> to see the build log.", htmlEscape(title))
+	if restarting {
+		b.WriteString(" The gateway is restarting now so the new compiled code can activate automatically.")
+	}
+	b.WriteString(" Use <code>feature_detail</code> to see the build log.")
+	return b.String()
 }
 
 func buildRepairAnnouncement(title string, attempt, attempts int, summary string) string {
@@ -497,6 +550,101 @@ func appendVerificationOutput(output, verification string) string {
 	return output + "\n\nVERIFICATION:\n" + verification
 }
 
+func appendDeploymentOutput(output, deployment string) string {
+	deployment = strings.TrimSpace(deployment)
+	if deployment == "" {
+		return output
+	}
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return "DEPLOY:\n" + deployment
+	}
+	return output + "\n\nDEPLOY:\n" + deployment
+}
+
+func deployBuiltFeature(ctx context.Context, feature *FeatureRequestsFeature, workspace string, req *FeatureRequest, output string, followup *buildFollowupContext) (buildDeployResult, error) {
+	if feature == nil || feature.sysConfigs == nil || feature.betaDeps.Stores == nil || feature.msgBus == nil {
+		slog.Debug("beta feature_requests: automatic deployment skipped because runtime deps are unavailable")
+		return buildDeployResult{}, nil
+	}
+
+	manifest, err := extractBuildArtifacts(output)
+	if err != nil {
+		return buildDeployResult{}, fmt.Errorf("automatic deployment manifest check failed: %w", err)
+	}
+
+	featureName, err := manifestFeatureName(manifest)
+	if err != nil {
+		return buildDeployResult{}, fmt.Errorf("automatic deployment feature name failed: %w", err)
+	}
+
+	deployCtx := deploymentContext(req, followup)
+	var detail strings.Builder
+
+	flagKey := "beta." + featureName
+	if err := feature.sysConfigs.Set(deployCtx, flagKey, "true"); err != nil {
+		return buildDeployResult{}, fmt.Errorf("enable %s: %w", flagKey, err)
+	}
+	fmt.Fprintf(&detail, "Enabled %s in system_configs.", flagKey)
+
+	toolNames, err := discoverFeatureToolNames(workspace, manifest.FeatureRoot)
+	if err != nil {
+		return buildDeployResult{}, fmt.Errorf("discover feature tools: %w", err)
+	}
+	if len(toolNames) > 0 {
+		fmt.Fprintf(&detail, "\nDiscovered feature tools: %s.", strings.Join(toolNames, ", "))
+	} else {
+		detail.WriteString("\nNo feature-specific tools were discovered under the generated feature root.")
+	}
+
+	if strings.TrimSpace(agentKeyFromFollowup(followup)) != "" && feature.betaDeps.Stores.Agents != nil && len(toolNames) > 0 {
+		changed, updatedTools, err := addToolsToAgentAllowlist(deployCtx, feature.betaDeps.Stores.Agents, followup.AgentKey, toolNames)
+		if err != nil {
+			return buildDeployResult{}, fmt.Errorf("update agent tool allowlist: %w", err)
+		}
+		if changed {
+			fmt.Fprintf(&detail, "\nExtended agent %s tool allowlist with: %s.", followup.AgentKey, strings.Join(toolNames, ", "))
+		} else {
+			fmt.Fprintf(&detail, "\nAgent %s tool allowlist already included: %s.", followup.AgentKey, strings.Join(updatedTools, ", "))
+		}
+	}
+
+	rebuildOut, rebuildErr := rebuildCurrentGatewayBinary(ctx, workspace)
+	if rebuildOut != "" {
+		fmt.Fprintf(&detail, "\n\n$ %s", rebuildOut)
+	}
+	if rebuildErr != nil {
+		return buildDeployResult{}, fmt.Errorf("rebuild live gateway binary: %w", rebuildErr)
+	}
+	detail.WriteString("\nGateway binary rebuilt successfully.")
+	detail.WriteString("\nA graceful gateway restart was requested so the new compiled feature can activate automatically.")
+
+	return buildDeployResult{
+		Detail:           strings.TrimSpace(detail.String()),
+		FeatureName:      featureName,
+		RestartRequested: true,
+	}, nil
+}
+
+func deploymentContext(req *FeatureRequest, followup *buildFollowupContext) context.Context {
+	tenantID := store.MasterTenantID
+	if followup != nil && followup.TenantID != uuid.Nil {
+		tenantID = followup.TenantID
+	} else if req != nil {
+		if parsed, err := uuid.Parse(strings.TrimSpace(req.TenantID)); err == nil && parsed != uuid.Nil {
+			tenantID = parsed
+		}
+	}
+	return store.WithTenantID(context.Background(), tenantID)
+}
+
+func agentKeyFromFollowup(followup *buildFollowupContext) string {
+	if followup == nil {
+		return ""
+	}
+	return strings.TrimSpace(followup.AgentKey)
+}
+
 func captureBuildFollowupContext(ctx context.Context, req *FeatureRequest) *buildFollowupContext {
 	if ctx == nil {
 		return nil
@@ -596,7 +744,8 @@ func buildFollowupMessage(req *FeatureRequest, retrying bool, summary string) st
 	b.WriteString("2. Then send the chat a concise update explaining what happened and what should happen next.\n")
 	if req.Status == StatusCompleted {
 		b.WriteString("Do not claim success unless feature_detail confirms the implementation and verification actually passed.\n")
-		b.WriteString("If the build really succeeded and the feature should be turned on now, you may call activate_beta_feature and any feature-specific configure/run tools that are available in this gateway.\n")
+		b.WriteString("If feature_detail says automatic deployment or gateway restart was already queued, do not call activate_beta_feature again unless the log explicitly says deployment was skipped.\n")
+		b.WriteString("If deployment was skipped, you may call activate_beta_feature and any feature-specific configure/run tools that are available in this gateway.\n")
 	} else if retrying {
 		b.WriteString("This was already a retry. Do not automatically call build_feature again from this follow-up turn unless the log shows a single clear, bounded next attempt is warranted.\n")
 	} else {
@@ -782,6 +931,162 @@ func verifyBuildArtifacts(workspace string, manifest buildArtifactsManifest, bui
 		return fmt.Errorf("no manifest file was updated during this build attempt")
 	}
 	return nil
+}
+
+func manifestFeatureName(manifest buildArtifactsManifest) (string, error) {
+	featureRoot, err := cleanBuildRelativePath(manifest.FeatureRoot)
+	if err != nil {
+		return "", fmt.Errorf("feature_root: %w", err)
+	}
+	if !strings.HasPrefix(featureRoot, "internal/beta/") {
+		return "", fmt.Errorf("feature_root must be under internal/beta/, got %q", featureRoot)
+	}
+	featureName := normalizeBetaFeatureName(filepath.Base(featureRoot))
+	if featureName == "" {
+		return "", fmt.Errorf("feature_root %q does not resolve to a feature name", featureRoot)
+	}
+	return featureName, nil
+}
+
+func discoverFeatureToolNames(workspace, featureRoot string) ([]string, error) {
+	featureRoot, err := cleanBuildRelativePath(featureRoot)
+	if err != nil {
+		return nil, fmt.Errorf("feature_root: %w", err)
+	}
+	root := filepath.Join(workspace, filepath.FromSlash(featureRoot))
+	info, err := os.Stat(root)
+	if err != nil {
+		return nil, fmt.Errorf("feature_root %q: %w", featureRoot, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("feature_root %q is not a directory", featureRoot)
+	}
+
+	var toolNames []string
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() || filepath.Ext(path) != ".go" {
+			return nil
+		}
+		src, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		for _, match := range featureToolNamePattern.FindAllStringSubmatch(string(src), -1) {
+			if len(match) < 2 {
+				continue
+			}
+			name := strings.TrimSpace(match[1])
+			if name != "" {
+				toolNames = append(toolNames, name)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return uniqueToolNames(toolNames), nil
+}
+
+func addToolsToAgentAllowlist(ctx context.Context, agentStore store.AgentStore, agentKey string, toolNames []string) (bool, []string, error) {
+	agentKey = strings.TrimSpace(agentKey)
+	requested := uniqueToolNames(toolNames)
+	if agentKey == "" || len(requested) == 0 {
+		return false, requested, nil
+	}
+
+	agentData, err := agentStore.GetByKey(ctx, agentKey)
+	if err != nil {
+		return false, nil, err
+	}
+
+	mergedConfig, changed, err := mergeAgentToolsConfig(agentData.ToolsConfig, requested)
+	if err != nil {
+		return false, nil, err
+	}
+	if !changed {
+		return false, requested, nil
+	}
+	if err := agentStore.Update(ctx, agentData.ID, map[string]any{"tools_config": mergedConfig}); err != nil {
+		return false, nil, err
+	}
+	return true, requested, nil
+}
+
+func mergeAgentToolsConfig(raw json.RawMessage, toolNames []string) (json.RawMessage, bool, error) {
+	requested := uniqueToolNames(toolNames)
+	if len(requested) == 0 {
+		return raw, false, nil
+	}
+
+	var spec config.ToolPolicySpec
+	if len(raw) > 0 {
+		parsed := (&store.AgentData{ToolsConfig: raw}).ParseToolsConfig()
+		if parsed == nil {
+			return nil, false, errors.New("invalid existing tools_config JSON")
+		}
+		spec = *parsed
+	}
+
+	changed := false
+	for _, name := range requested {
+		if !slices.Contains(spec.AlsoAllow, name) {
+			spec.AlsoAllow = append(spec.AlsoAllow, name)
+			changed = true
+		}
+	}
+	if !changed {
+		return raw, false, nil
+	}
+	spec.AlsoAllow = uniqueToolNames(spec.AlsoAllow)
+
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		return nil, false, err
+	}
+	return encoded, true, nil
+}
+
+func uniqueToolNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func rebuildCurrentGatewayBinary(ctx context.Context, workspace string) (string, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve current executable: %w", err)
+	}
+	if resolved, resolveErr := filepath.EvalSymlinks(exePath); resolveErr == nil && strings.TrimSpace(resolved) != "" {
+		exePath = resolved
+	}
+	exePath = filepath.Clean(exePath)
+
+	cmdText := fmt.Sprintf("go build -o %s .", exePath)
+	output, err := runBuildVerificationCommand(ctx, workspace, "go", "build", "-o", exePath, ".")
+	if strings.TrimSpace(output) == "" {
+		return cmdText, err
+	}
+	return cmdText + "\n" + output, err
 }
 
 func cleanBuildRelativePath(path string) (string, error) {

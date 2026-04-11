@@ -9,7 +9,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -96,6 +98,9 @@ func runGateway() {
 			slog.Warn("unknown GOCLAW_EDITION, using standard", "value", edName)
 		}
 	}
+
+	restartState := &gatewayRestartState{}
+	defer execGatewayRestartIfRequested(restartState)
 
 	// Create core components
 	msgBus := bus.New()
@@ -893,6 +898,7 @@ func runGateway() {
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
 
 	// Skills directory watcher — auto-detect new/removed/modified skills at runtime.
 	if skillsWatcher, err := skills.NewWatcher(skillsLoader); err != nil {
@@ -1129,38 +1135,69 @@ func runGateway() {
 		taskTicker.Start()
 	}
 
+	var shutdownOnce sync.Once
+	gracefulShutdown := func(trigger, detail string) {
+		shutdownOnce.Do(func() {
+			logAttrs := []any{"trigger", trigger}
+			if strings.TrimSpace(detail) != "" {
+				logAttrs = append(logAttrs, "detail", detail)
+			}
+			slog.Info("graceful shutdown initiated", logAttrs...)
+
+			// Broadcast shutdown event
+			server.BroadcastEvent(*protocol.NewEvent(protocol.EventShutdown, nil))
+
+			// Stop channels, cron, heartbeat, and task ticker
+			channelMgr.StopAll(context.Background())
+			pgStores.Cron.Stop()
+			heartbeatTicker.Stop()
+			if taskTicker != nil {
+				taskTicker.Stop()
+			}
+
+			// Drain audit log queue before closing DB
+			if auditCh != nil {
+				close(auditCh)
+			}
+
+			// Close provider resources (e.g. Claude CLI temp files)
+			providerRegistry.Close()
+
+			// Stop sandbox pruning + release containers
+			if sandboxMgr != nil {
+				sandboxMgr.Stop()
+				slog.Info("releasing sandbox containers...")
+				sandboxMgr.ReleaseAll(context.Background())
+			}
+
+			cancel()
+		})
+	}
+
 	go func() {
 		sig := <-sigCh
-		slog.Info("graceful shutdown initiated", "signal", sig)
-
-		// Broadcast shutdown event
-		server.BroadcastEvent(*protocol.NewEvent(protocol.EventShutdown, nil))
-
-		// Stop channels, cron, heartbeat, and task ticker
-		channelMgr.StopAll(context.Background())
-		pgStores.Cron.Stop()
-		heartbeatTicker.Stop()
-		if taskTicker != nil {
-			taskTicker.Stop()
-		}
-
-		// Drain audit log queue before closing DB
-		if auditCh != nil {
-			close(auditCh)
-		}
-
-		// Close provider resources (e.g. Claude CLI temp files)
-		providerRegistry.Close()
-
-		// Stop sandbox pruning + release containers
-		if sandboxMgr != nil {
-			sandboxMgr.Stop()
-			slog.Info("releasing sandbox containers...")
-			sandboxMgr.ReleaseAll(context.Background())
-		}
-
-		cancel()
+		gracefulShutdown("signal", sig.String())
 	}()
+
+	msgBus.Subscribe("gateway-restart", func(evt bus.Event) {
+		if evt.Name != bus.TopicGatewayRestartRequested {
+			return
+		}
+		reason := gatewayRestartReason(evt)
+		if reason == "" {
+			reason = "internal restart requested"
+		}
+		if !restartState.Request(reason) {
+			return
+		}
+		slog.Info("graceful restart requested", "reason", reason, "grace_period", gatewayRestartGracePeriod)
+		go func() {
+			if gatewayRestartGracePeriod > 0 {
+				time.Sleep(gatewayRestartGracePeriod)
+			}
+			gracefulShutdown("restart", reason)
+		}()
+	})
 
 	// Activate beta features (flag-gated, registered via init() blank imports).
 	betaFlags := beta.NewFlagSource(pgStores.SystemConfigs)

@@ -79,29 +79,30 @@ const (
 
 // Topic constants for msgBus.Subscribe() / Broadcast().
 const (
-	TopicCacheBootstrap        = "cache:bootstrap"
-	TopicCacheAgent            = "cache:agent"
-	TopicCacheSkills           = "cache:skills"
-	TopicCacheCron             = "cache:cron"
-	TopicCacheBuiltinTools     = "cache:builtin_tools"
-	TopicCacheTeam             = "cache:team"
-	TopicCacheUserWorkspace    = "cache:user_workspace"
-	TopicCacheChannelInstances = "cache:channel_instances"
-	TopicCacheSkillGrants      = "cache:skill_grants"
-	TopicCacheMCP              = "cache:mcp"
-	TopicCacheProvider         = "cache:provider"
-	TopicCacheHeartbeat        = "cache:heartbeat"
-	TopicCacheConfigPerms      = "cache:config_perms"
-	TopicAudit                 = "audit"
-	TopicTeamTaskAudit         = "team-task-audit"
-	TopicChannelStreaming      = "channel-streaming"
-	TopicConfigChanged         = "config:changed"
-	TopicSystemConfigChanged   = "system_config:changed"
-	TopicPairingRevoked        = "pairing:revoked"
-	TopicAgentStatusChanged    = "agent:status_changed"
-	TopicAgentDeleted          = "agent:deleted"
-	TopicTelegramPollAnswer    = "telegram:poll_answer"
-	TopicTelegramPollClosed    = "telegram:poll_closed"
+	TopicCacheBootstrap          = "cache:bootstrap"
+	TopicCacheAgent              = "cache:agent"
+	TopicCacheSkills             = "cache:skills"
+	TopicCacheCron               = "cache:cron"
+	TopicCacheBuiltinTools       = "cache:builtin_tools"
+	TopicCacheTeam               = "cache:team"
+	TopicCacheUserWorkspace      = "cache:user_workspace"
+	TopicCacheChannelInstances   = "cache:channel_instances"
+	TopicCacheSkillGrants        = "cache:skill_grants"
+	TopicCacheMCP                = "cache:mcp"
+	TopicCacheProvider           = "cache:provider"
+	TopicCacheHeartbeat          = "cache:heartbeat"
+	TopicCacheConfigPerms        = "cache:config_perms"
+	TopicAudit                   = "audit"
+	TopicTeamTaskAudit           = "team-task-audit"
+	TopicChannelStreaming        = "channel-streaming"
+	TopicConfigChanged           = "config:changed"
+	TopicSystemConfigChanged     = "system_config:changed"
+	TopicGatewayRestartRequested = "gateway:restart_requested"
+	TopicPairingRevoked          = "pairing:revoked"
+	TopicAgentStatusChanged      = "agent:status_changed"
+	TopicAgentDeleted            = "agent:deleted"
+	TopicTelegramPollAnswer      = "telegram:poll_answer"
+	TopicTelegramPollClosed      = "telegram:poll_closed"
 )
 
 // EventPairingRevoked is the event name broadcast when a paired device is revoked.
@@ -128,6 +129,12 @@ type AgentDeletedPayload struct {
 	AgentKey string    `json:"agent_key"`
 	Provider string    `json:"provider,omitempty"` // provider name for orphan cleanup
 	TenantID uuid.UUID `json:"tenant_id,omitempty"`
+}
+
+// GatewayRestartRequestedPayload asks the running gateway to gracefully stop
+// and re-exec its current binary.
+type GatewayRestartRequestedPayload struct {
+	Reason string `json:"reason,omitempty"`
 }
 
 // AuditEventPayload carries audit log data emitted by handlers.

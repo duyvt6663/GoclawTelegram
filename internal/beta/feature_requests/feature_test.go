@@ -353,6 +353,76 @@ func TestBuildProcessEnvUsesWritableTempCaches(t *testing.T) {
 	}
 }
 
+func TestDiscoverFeatureToolNamesFindsLiteralToolNames(t *testing.T) {
+	repoRoot := newTestBuildRepo(t)
+	featureDir := filepath.Join(repoRoot, "internal", "beta", "example_feature")
+	if err := os.MkdirAll(featureDir, 0o755); err != nil {
+		t.Fatalf("mkdir feature dir: %v", err)
+	}
+	files := map[string]string{
+		filepath.Join(featureDir, "feature.go"): `package example
+type exampleFeature struct{}
+func (f *exampleFeature) Name() string { return featureName }
+`,
+		filepath.Join(featureDir, "tool_configure.go"): `package example
+type configureTool struct{}
+func (t *configureTool) Name() string { return "example_configure" }
+`,
+		filepath.Join(featureDir, "tool_run.go"): `package example
+type runTool struct{}
+func (t *runTool) Name() string { return "example_run" }
+`,
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	got, err := discoverFeatureToolNames(repoRoot, "internal/beta/example_feature")
+	if err != nil {
+		t.Fatalf("discoverFeatureToolNames() error = %v", err)
+	}
+	want := []string{"example_configure", "example_run"}
+	if len(got) != len(want) {
+		t.Fatalf("len(discovered tools) = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("discovered tools[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestMergeAgentToolsConfigAddsFeatureToolsToAlsoAllow(t *testing.T) {
+	raw := json.RawMessage(`{"allow":["build_feature"],"alsoAllow":["feature_detail"]}`)
+
+	merged, changed, err := mergeAgentToolsConfig(raw, []string{"feature_detail", "job_crawler_run", "job_crawler_config_upsert"})
+	if err != nil {
+		t.Fatalf("mergeAgentToolsConfig() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("expected tools_config merge to report a change")
+	}
+
+	spec := (&store.AgentData{ToolsConfig: merged}).ParseToolsConfig()
+	if spec == nil {
+		t.Fatal("merged tools_config failed to parse")
+	}
+	if len(spec.Allow) != 1 || spec.Allow[0] != "build_feature" {
+		t.Fatalf("Allow = %v, want [build_feature]", spec.Allow)
+	}
+	wantAlso := []string{"feature_detail", "job_crawler_config_upsert", "job_crawler_run"}
+	if len(spec.AlsoAllow) != len(wantAlso) {
+		t.Fatalf("AlsoAllow = %v, want %v", spec.AlsoAllow, wantAlso)
+	}
+	for i := range wantAlso {
+		if spec.AlsoAllow[i] != wantAlso[i] {
+			t.Fatalf("AlsoAllow[%d] = %q, want %q", i, spec.AlsoAllow[i], wantAlso[i])
+		}
+	}
+}
+
 func TestActivateBetaFeatureToolEnablesAndHotActivatesFeature(t *testing.T) {
 	t.Cleanup(func() { beta.ShutdownAll(context.Background()) })
 
@@ -455,8 +525,11 @@ func TestBuildResultAndLifecycleMessagesCoverRetryStates(t *testing.T) {
 	if got := buildStartAnnouncement("Russian Roulette", true); !strings.Contains(got, "Retrying feature") {
 		t.Fatalf("buildStartAnnouncement(retry) = %q", got)
 	}
-	if got := buildSuccessAnnouncement("Russian Roulette", true); !strings.Contains(got, "retry completed successfully") {
+	if got := buildSuccessAnnouncement("Russian Roulette", true, false); !strings.Contains(got, "retry completed successfully") {
 		t.Fatalf("buildSuccessAnnouncement(retry) = %q", got)
+	}
+	if got := buildSuccessAnnouncement("Russian Roulette", false, true); !strings.Contains(got, "gateway is restarting now") {
+		t.Fatalf("buildSuccessAnnouncement(restarting) = %q, want restart note", got)
 	}
 	if got := buildFailureAnnouncement("Russian Roulette", true, "error: boom"); !strings.Contains(got, "retry failed") || !strings.Contains(got, "build_feature") {
 		t.Fatalf("buildFailureAnnouncement(retry) = %q", got)
@@ -792,6 +865,83 @@ func TestBuildFeatureToolRunCodexPublishesBuildFollowupInbound(t *testing.T) {
 	}
 	if !strings.Contains(msg.Content, "feature_detail") {
 		t.Fatalf("follow-up content = %q, want feature_detail instruction", msg.Content)
+	}
+}
+
+func TestBuildFeatureToolRunCodexRequestsGatewayRestartAfterDeploy(t *testing.T) {
+	feature := newTestFeatureFeature(t)
+
+	req := newTestFeatureRequest("deploy-restart", "")
+	req.Channel = "telegram"
+	req.ChatID = "-100654"
+	req.LocalKey = "-100654:topic:42"
+	req.Status = StatusBuilding
+	req.BuildLog = "Build started at 2026-04-10T16:00:06+07:00\n"
+	if err := feature.store.create(req); err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	var restartEvent bus.Event
+	feature.msgBus.Subscribe("restart-capture", func(evt bus.Event) {
+		if evt.Name == bus.TopicGatewayRestartRequested {
+			restartEvent = evt
+		}
+	})
+
+	tool := &buildFeatureTool{
+		feature:   feature,
+		workspace: t.TempDir(),
+		maxTries:  1,
+		runner: func(_ context.Context, workspace, prompt string) (string, error) {
+			return "BUILD_ARTIFACTS: {\"feature_root\":\"internal/beta/job_crawler\",\"files\":[\"internal/beta/job_crawler/feature.go\",\"internal/beta/all/all.go\"]}", nil
+		},
+		verifier: func(_ context.Context, workspace, output string, buildStartedAt time.Time, requireFreshArtifacts bool) (string, error) {
+			return "Artifact manifest verified for internal/beta/job_crawler.\ngo build ./... passed.\ngo vet ./... passed.", nil
+		},
+		deployer: func(_ context.Context, workspace string, req *FeatureRequest, output string, followup *buildFollowupContext) (buildDeployResult, error) {
+			return buildDeployResult{
+				Detail:           "Enabled beta.job_crawler in system_configs.\nGateway binary rebuilt successfully.",
+				FeatureName:      "job_crawler",
+				RestartRequested: true,
+			}, nil
+		},
+	}
+
+	tool.runCodex(req, false, tool.workspace, time.Now(), nil)
+
+	got, err := feature.store.getByID("", req.ID)
+	if err != nil {
+		t.Fatalf("getByID after deploy run: %v", err)
+	}
+	if got.Status != StatusCompleted {
+		t.Fatalf("status after deploy run = %s, want %s", got.Status, StatusCompleted)
+	}
+	if !strings.Contains(got.BuildLog, "DEPLOY:") {
+		t.Fatalf("build log missing deploy section: %q", got.BuildLog)
+	}
+	if !strings.Contains(got.BuildLog, "Enabled beta.job_crawler in system_configs.") {
+		t.Fatalf("build log missing deploy detail: %q", got.BuildLog)
+	}
+
+	payload, ok := restartEvent.Payload.(bus.GatewayRestartRequestedPayload)
+	if !ok {
+		t.Fatalf("restart payload type = %T, want bus.GatewayRestartRequestedPayload", restartEvent.Payload)
+	}
+	if restartEvent.Name != bus.TopicGatewayRestartRequested {
+		t.Fatalf("restart event name = %q, want %q", restartEvent.Name, bus.TopicGatewayRestartRequested)
+	}
+	if !strings.Contains(payload.Reason, "job_crawler") {
+		t.Fatalf("restart reason = %q, want feature name", payload.Reason)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	msg, ok := feature.msgBus.SubscribeOutbound(ctx)
+	if !ok {
+		t.Fatal("expected success outbound message")
+	}
+	if !strings.Contains(msg.Content, "gateway is restarting now") {
+		t.Fatalf("success announcement = %q, want restart note", msg.Content)
 	}
 }
 
