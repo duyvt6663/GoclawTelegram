@@ -32,6 +32,20 @@ type DynamicCommandHandler interface {
 	Handle(ctx context.Context, channel *Channel, cmdCtx DynamicCommandContext) bool
 }
 
+// ChannelScopedDynamicCommandHandler optionally restricts a dynamic command to
+// specific Telegram channel instances for both dispatch and menu sync.
+type ChannelScopedDynamicCommandHandler interface {
+	DynamicCommandHandler
+	EnabledForChannel(channel *Channel) bool
+}
+
+// ContextScopedDynamicCommandHandler optionally restricts a dynamic command to
+// specific chat/topic targets within a Telegram channel instance.
+type ContextScopedDynamicCommandHandler interface {
+	DynamicCommandHandler
+	EnabledForContext(ctx context.Context, channel *Channel, cmdCtx DynamicCommandContext) bool
+}
+
 var dynamicCommands = struct {
 	mu       sync.RWMutex
 	handlers map[string]DynamicCommandHandler
@@ -91,12 +105,24 @@ func DispatchDynamicCommand(ctx context.Context, channel *Channel, command strin
 	if handler == nil {
 		return false
 	}
+	if scoped, ok := handler.(ChannelScopedDynamicCommandHandler); ok && !scoped.EnabledForChannel(channel) {
+		return false
+	}
+	if scoped, ok := handler.(ContextScopedDynamicCommandHandler); ok && !scoped.EnabledForContext(ctx, channel, cmdCtx) {
+		return false
+	}
 	return handler.Handle(ctx, channel, cmdCtx)
 }
 
 // RegisteredMenuCommands returns Telegram bot menu entries contributed by
 // runtime command handlers, sorted for stable command syncs.
 func RegisteredMenuCommands() []telego.BotCommand {
+	return RegisteredMenuCommandsForChannel(nil)
+}
+
+// RegisteredMenuCommandsForChannel returns runtime Telegram menu entries that
+// are visible for the given channel instance.
+func RegisteredMenuCommandsForChannel(channel *Channel) []telego.BotCommand {
 	dynamicCommands.mu.RLock()
 	defer dynamicCommands.mu.RUnlock()
 
@@ -106,6 +132,9 @@ func RegisteredMenuCommands() []telego.BotCommand {
 
 	commands := make([]telego.BotCommand, 0, len(dynamicCommands.handlers))
 	for command, handler := range dynamicCommands.handlers {
+		if scoped, ok := handler.(ChannelScopedDynamicCommandHandler); ok && channel != nil && !scoped.EnabledForChannel(channel) {
+			continue
+		}
 		desc := strings.TrimSpace(handler.Description())
 		if desc == "" {
 			continue

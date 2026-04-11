@@ -254,6 +254,11 @@ func (t *buildFeatureTool) runCodexPrompt(ctx context.Context, workspace, prompt
 	if strings.TrimSpace(workspace) != "" {
 		cmd.Dir = workspace
 	}
+	env, err := buildProcessEnv()
+	if err != nil {
+		return "", fmt.Errorf("prepare build env: %w", err)
+	}
+	cmd.Env = env
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -261,7 +266,7 @@ func (t *buildFeatureTool) runCodexPrompt(ctx context.Context, workspace, prompt
 
 	slog.Info("beta feature_requests: codex started")
 
-	err := cmd.Run()
+	err = cmd.Run()
 
 	output := stdout.String()
 	if errOut := stderr.String(); errOut != "" {
@@ -367,6 +372,12 @@ func shouldAutoRepairBuildFailure(output string, runErr error) bool {
 		strings.Contains(combined, "executable file not found"),
 		strings.Contains(combined, "command not found"):
 		return false
+	case strings.Contains(combined, "operation not permitted") &&
+		(strings.Contains(combined, "/library/caches/go-build") ||
+			strings.Contains(combined, "/pkg/mod/cache") ||
+			strings.Contains(combined, "gocache") ||
+			strings.Contains(combined, "gomodcache")):
+		return false
 	case strings.Contains(combined, "unexpected argument") && strings.Contains(combined, "usage: codex"):
 		return false
 	default:
@@ -431,6 +442,12 @@ func summarizeBuildFailure(output string, runErr error) string {
 			continue
 		case strings.Contains(lower, "not inside a trusted directory"),
 			strings.Contains(lower, "--skip-git-repo-check"):
+			important = append(important, line)
+		case strings.Contains(lower, "operation not permitted") &&
+			(strings.Contains(lower, "/library/caches/go-build") ||
+				strings.Contains(lower, "/pkg/mod/cache") ||
+				strings.Contains(lower, "gocache") ||
+				strings.Contains(lower, "gomodcache")):
 			important = append(important, line)
 		case strings.Contains(lower, "error:"),
 			strings.Contains(lower, "failed"),
@@ -785,12 +802,17 @@ func cleanBuildRelativePath(path string) (string, error) {
 func runBuildVerificationCommand(ctx context.Context, workspace string, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = workspace
+	env, err := buildProcessEnv()
+	if err != nil {
+		return "", fmt.Errorf("prepare build env: %w", err)
+	}
+	cmd.Env = env
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err = cmd.Run()
 
 	output := strings.TrimSpace(stdout.String())
 	if errOut := strings.TrimSpace(stderr.String()); errOut != "" {
@@ -801,6 +823,44 @@ func runBuildVerificationCommand(ctx context.Context, workspace string, name str
 		}
 	}
 	return truncateBuildOutput(output), err
+}
+
+func buildProcessEnv() ([]string, error) {
+	cacheRoot := filepath.Join(os.TempDir(), "goclaw-feature-build")
+	paths := []struct {
+		key string
+		dir string
+	}{
+		{key: "GOCACHE", dir: filepath.Join(cacheRoot, "gocache")},
+		{key: "GOMODCACHE", dir: filepath.Join(cacheRoot, "gomodcache")},
+		{key: "GOTMPDIR", dir: filepath.Join(cacheRoot, "tmp")},
+	}
+
+	env := os.Environ()
+	for _, path := range paths {
+		if err := os.MkdirAll(path.dir, 0o755); err != nil {
+			return nil, fmt.Errorf("prepare %s at %s: %w", path.key, path.dir, err)
+		}
+		env = setEnvValue(env, path.key, path.dir)
+	}
+	return env, nil
+}
+
+func setEnvValue(env []string, key, value string) []string {
+	if len(env) == 0 {
+		return []string{key + "=" + value}
+	}
+
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	out = append(out, prefix+value)
+	return out
 }
 
 func buildCodexPrompt(req *FeatureRequest) string {

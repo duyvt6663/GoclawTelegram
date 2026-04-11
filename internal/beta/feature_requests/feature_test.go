@@ -324,6 +324,35 @@ func TestBuildTimeoutIsTwoHours(t *testing.T) {
 	}
 }
 
+func TestBuildProcessEnvUsesWritableTempCaches(t *testing.T) {
+	t.Setenv("GOCACHE", "/tmp/old-gocache")
+	t.Setenv("GOMODCACHE", "/tmp/old-gomodcache")
+	t.Setenv("GOTMPDIR", "/tmp/old-gotmpdir")
+
+	env, err := buildProcessEnv()
+	if err != nil {
+		t.Fatalf("buildProcessEnv() error = %v", err)
+	}
+
+	tempRoot := filepath.Join(os.TempDir(), "goclaw-feature-build")
+	for _, key := range []string{"GOCACHE", "GOMODCACHE", "GOTMPDIR"} {
+		value := testEnvValue(env, key)
+		if value == "" {
+			t.Fatalf("%s missing from build env", key)
+		}
+		if !strings.HasPrefix(value, tempRoot) {
+			t.Fatalf("%s = %q, want path under %q", key, value, tempRoot)
+		}
+		info, statErr := os.Stat(value)
+		if statErr != nil {
+			t.Fatalf("stat %s at %q: %v", key, value, statErr)
+		}
+		if !info.IsDir() {
+			t.Fatalf("%s path %q is not a directory", key, value)
+		}
+	}
+}
+
 func TestActivateBetaFeatureToolEnablesAndHotActivatesFeature(t *testing.T) {
 	t.Cleanup(func() { beta.ShutdownAll(context.Background()) })
 
@@ -509,6 +538,9 @@ func TestShouldAutoRepairBuildFailureClassifiesRepoAndCLIProblems(t *testing.T) 
 	}
 	if shouldAutoRepairBuildFailure("", fmt.Errorf("codex terminated by signal: killed")) {
 		t.Fatal("expected signal-killed codex run to be non-repairable by the inner loop")
+	}
+	if shouldAutoRepairBuildFailure("go: writing stat cache: open /Users/test/Library/Caches/go-build/ab/cd: operation not permitted", fmt.Errorf("go build ./... verification failed: exit status 1")) {
+		t.Fatal("expected Go build cache permission failure to be non-repairable by the inner loop")
 	}
 }
 
@@ -910,4 +942,14 @@ func (s *featureTestSystemConfigStore) List(ctx context.Context) (map[string]str
 
 func (s *featureTestSystemConfigStore) scopedKey(ctx context.Context, key string) string {
 	return store.TenantIDFromContext(ctx).String() + ":" + key
+}
+
+func testEnvValue(env []string, key string) string {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
 }

@@ -202,7 +202,7 @@ func (c *Channel) Start(ctx context.Context) error {
 
 	// Register bot menu commands with retry.
 	go func() {
-		commands := DefaultMenuCommands()
+		commands := DefaultMenuCommandsForChannel(c)
 		syncCtx, cancel := context.WithTimeout(pollCtx, probeOverallTimeout)
 		defer cancel()
 

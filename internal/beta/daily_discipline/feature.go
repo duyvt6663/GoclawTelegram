@@ -128,18 +128,22 @@ func (f *DailyDisciplineFeature) syncTelegramMenus() {
 		return
 	}
 	for _, name := range f.channelMgr.GetEnabledChannels() {
-		channel, ok := f.channelMgr.GetChannel(name)
-		if !ok || channel.Type() != channels.TypeTelegram {
+		rawChannel, ok := f.channelMgr.GetChannel(name)
+		if !ok || rawChannel.Type() != channels.TypeTelegram {
 			continue
 		}
-		tg, ok := channel.(interface {
+		channel, ok := rawChannel.(*telegramchannel.Channel)
+		if !ok {
+			continue
+		}
+		tg, ok := rawChannel.(interface {
 			SyncMenuCommands(ctx context.Context, commands []telego.BotCommand) error
 		})
 		if !ok {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := tg.SyncMenuCommands(ctx, telegramchannel.DefaultMenuCommands()); err != nil {
+		if err := tg.SyncMenuCommands(ctx, telegramchannel.DefaultMenuCommandsForChannel(channel)); err != nil {
 			slog.Warn("beta daily discipline menu sync failed", "channel", name, "error", err)
 		}
 		cancel()
