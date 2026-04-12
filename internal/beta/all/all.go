@@ -7,6 +7,7 @@ import (
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/daily_discipline"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/daily_iching"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/daily_iching_index_v4"
+	_ "github.com/nextlevelbuilder/goclaw/internal/beta/daily_iching_query"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/feature_requests"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/job_crawler"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/lop_pho"
