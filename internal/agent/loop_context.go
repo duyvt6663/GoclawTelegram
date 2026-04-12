@@ -61,6 +61,9 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 	if req.ChannelType != "" {
 		ctx = tools.WithToolChannelType(ctx, req.ChannelType)
 	}
+	if req.ThreadID > 0 {
+		ctx = tools.WithToolThreadID(ctx, req.ThreadID)
+	}
 	if req.ReactionMediaMode {
 		ctx = tools.WithReactionMediaMode(ctx, true)
 	}
@@ -252,7 +255,11 @@ func (l *Loop) injectContext(ctx context.Context, req *RunRequest) (contextSetup
 		SharedKG:            store.IsSharedKG(ctx),
 		RestrictToWorkspace: l.restrictToWs != nil && *l.restrictToWs,
 		BuiltinToolSettings: l.builtinToolSettings,
+		ChannelName:         req.Channel,
 		ChannelType:         req.ChannelType,
+		ChatID:              req.ChatID,
+		ThreadID:            req.ThreadID,
+		LocalKey:            req.LocalKey,
 		SubagentsCfg:        l.subagentsCfg,
 		ParentModel:         l.model,
 		ParentProvider:      providerName,

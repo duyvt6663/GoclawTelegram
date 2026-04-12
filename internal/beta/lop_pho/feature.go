@@ -12,6 +12,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/beta"
 	lopphopolldedupe "github.com/nextlevelbuilder/goclaw/internal/beta/lop_pho_poll_dedupe"
+	"github.com/nextlevelbuilder/goclaw/internal/beta/topicrouting"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	telegramchannel "github.com/nextlevelbuilder/goclaw/internal/channels/telegram"
@@ -84,6 +85,11 @@ func (f *LopPhoFeature) Init(deps beta.Deps) error {
 
 	telegramchannel.RegisterDynamicCommand(&voteCommand{feature: f})
 	f.syncTelegramMenus()
+	topicrouting.RegisterTopicFeatureTools(
+		featureName,
+		(&openVoteTool{}).Name(),
+		(&statusTool{}).Name(),
+	)
 
 	if deps.ToolRegistry != nil {
 		deps.ToolRegistry.Register(&openVoteTool{feature: f})
@@ -107,6 +113,7 @@ func (f *LopPhoFeature) Shutdown(_ context.Context) error {
 	}
 	classroles.SetLopPhoChecker(nil)
 	telegramchannel.UnregisterDynamicCommand(voteCommandName)
+	topicrouting.UnregisterTopicFeatureTools(featureName)
 	return nil
 }
 

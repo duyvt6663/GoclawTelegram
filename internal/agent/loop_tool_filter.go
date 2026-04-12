@@ -14,29 +14,41 @@ import (
 // (via getUserMCPTools) so they are included in policy filtering and execution.
 // Returns tool definitions for the provider, an allowed-tools map for execution validation,
 // and the (potentially modified) messages slice when final-iteration stripping appends a hint.
-func (l *Loop) buildFilteredTools(req *RunRequest, hadBootstrap bool, iteration, maxIter int, messages []providers.Message) ([]providers.ToolDefinition, map[string]bool, []providers.Message) {
+func (l *Loop) buildFilteredTools(req *RunRequest, topicHiddenTools map[string]bool, hadBootstrap bool, iteration, maxIter int, messages []providers.Message) ([]providers.ToolDefinition, map[string]bool, []providers.Message) {
 	// Build provider request with policy-filtered tools.
 	var toolDefs []providers.ToolDefinition
-	var allowedTools map[string]bool
 	if l.toolPolicy != nil {
 		toolDefs = l.toolPolicy.FilterTools(l.tools, l.id, l.provider.Name(), l.agentToolPolicy, req.ToolAllow, false, false)
-		allowedTools = make(map[string]bool, len(toolDefs))
-		for _, td := range toolDefs {
-			allowedTools[td.Function.Name] = true
-		}
 	} else {
 		toolDefs = l.tools.ProviderDefs()
 	}
 
 	// Per-tenant tool exclusions: remove tools disabled for this agent's tenant.
 	if len(l.disabledTools) > 0 {
-		filtered := toolDefs[:0]
+		filtered := toolDefs[:0:0]
 		for _, td := range toolDefs {
 			if !l.disabledTools[td.Function.Name] {
 				filtered = append(filtered, td)
-			} else {
-				delete(allowedTools, td.Function.Name)
 			}
+		}
+		toolDefs = filtered
+	}
+
+	// Topic-scoped beta routing: hide feature-owned tools that are disabled for
+	// the current chat/topic while leaving unrelated global tools available.
+	if len(topicHiddenTools) > 0 {
+		aliases := l.tools.Aliases()
+		filtered := toolDefs[:0:0]
+		for _, td := range toolDefs {
+			name := td.Function.Name
+			canonical := name
+			if resolved, ok := aliases[name]; ok && resolved != "" {
+				canonical = resolved
+			}
+			if topicHiddenTools[name] || topicHiddenTools[canonical] {
+				continue
+			}
+			filtered = append(filtered, td)
 		}
 		toolDefs = filtered
 	}
@@ -89,6 +101,11 @@ func (l *Loop) buildFilteredTools(req *RunRequest, hadBootstrap bool, iteration,
 			Role:    "user",
 			Content: "[System] Final iteration reached. Summarize all findings and respond to the user now. No more tool calls allowed.",
 		})
+	}
+
+	allowedTools := make(map[string]bool, len(toolDefs))
+	for _, td := range toolDefs {
+		allowedTools[td.Function.Name] = true
 	}
 
 	return toolDefs, allowedTools, messages

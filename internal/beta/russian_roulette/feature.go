@@ -10,6 +10,7 @@ import (
 	"github.com/mymmrac/telego"
 
 	"github.com/nextlevelbuilder/goclaw/internal/beta"
+	"github.com/nextlevelbuilder/goclaw/internal/beta/topicrouting"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	telegramchannel "github.com/nextlevelbuilder/goclaw/internal/channels/telegram"
@@ -48,6 +49,13 @@ func (f *RussianRouletteFeature) Init(deps beta.Deps) error {
 
 	telegramchannel.RegisterDynamicCommand(&rouletteCommand{feature: f})
 	f.syncTelegramMenus()
+	topicrouting.RegisterTopicFeatureTools(
+		featureName,
+		(&configureTool{}).Name(),
+		(&statusTool{}).Name(),
+		(&leaderboardTool{}).Name(),
+		(&playTool{}).Name(),
+	)
 
 	if deps.ToolRegistry != nil {
 		deps.ToolRegistry.Register(&configureTool{feature: f})
@@ -68,6 +76,7 @@ func (f *RussianRouletteFeature) Init(deps beta.Deps) error {
 
 func (f *RussianRouletteFeature) Shutdown(_ context.Context) error {
 	telegramchannel.UnregisterDynamicCommand("/roulette")
+	topicrouting.UnregisterTopicFeatureTools(featureName)
 	return nil
 }
 

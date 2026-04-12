@@ -347,6 +347,7 @@ func processNormalMessage(
 	// Schedule through main lane (per-session concurrency controlled by maxConcurrent)
 	toolChoice := selectToolChoice(msg.Metadata)
 	reactionMediaMode := msg.Metadata[implicitReactionMediaMetadata] == "true"
+	threadID := resolveRunThreadID(msg.Metadata, msg.Metadata["local_key"])
 	outCh := deps.Sched.ScheduleWithOpts(schedCtx, "main", agent.RunRequest{
 		SessionKey:        sessionKey,
 		Message:           msg.Content,
@@ -356,6 +357,7 @@ func processNormalMessage(
 		ChannelType:       resolveChannelType(deps.ChannelMgr, msg.Channel),
 		ChatTitle:         msg.Metadata["chat_title"],
 		ChatID:            msg.ChatID,
+		ThreadID:          threadID,
 		PeerKind:          peerKind,
 		LocalKey:          msg.Metadata["local_key"],
 		UserID:            userID,

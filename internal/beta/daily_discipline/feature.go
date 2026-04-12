@@ -11,6 +11,7 @@ import (
 	"github.com/mymmrac/telego"
 
 	"github.com/nextlevelbuilder/goclaw/internal/beta"
+	"github.com/nextlevelbuilder/goclaw/internal/beta/topicrouting"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	telegramchannel "github.com/nextlevelbuilder/goclaw/internal/channels/telegram"
@@ -66,6 +67,13 @@ func (f *DailyDisciplineFeature) Init(deps beta.Deps) error {
 
 	telegramchannel.RegisterDynamicCommand(&disciplineCommand{feature: f})
 	f.syncTelegramMenus()
+	topicrouting.RegisterTopicFeatureTools(
+		featureName,
+		(&configureTool{}).Name(),
+		(&statusTool{}).Name(),
+		(&runTool{}).Name(),
+		(&submitResponseTool{}).Name(),
+	)
 
 	if deps.ToolRegistry != nil {
 		deps.ToolRegistry.Register(&configureTool{feature: f})
@@ -94,6 +102,7 @@ func (f *DailyDisciplineFeature) Shutdown(_ context.Context) error {
 		f.msgBus.Unsubscribe(f.pollSubscriptionID())
 	}
 	telegramchannel.UnregisterDynamicCommand("/discipline")
+	topicrouting.UnregisterTopicFeatureTools(featureName)
 	if f.schedulerCancel != nil {
 		f.schedulerCancel()
 	}

@@ -59,6 +59,8 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (result *RunResult, 
 		l.emit(event)
 	}
 
+	req.ThreadID = effectiveRunThreadID(&req)
+
 	// Inject context: agent/tenant/user/workspace scoping, input guard, message truncation.
 	ctxSetup, err := l.injectContext(ctx, &req)
 	if err != nil {
@@ -66,6 +68,18 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (result *RunResult, 
 	}
 	ctx = ctxSetup.ctx
 	resolvedTeamSettings := ctxSetup.resolvedTeamSettings
+
+	topicToolDecision, err := l.resolveTopicToolDecision(ctx, &req)
+	if err != nil {
+		slog.Warn("topic tool routing resolve failed",
+			"agent", l.id,
+			"channel", req.Channel,
+			"chat_id", req.ChatID,
+			"thread_id", req.ThreadID,
+			"error", err,
+		)
+	}
+	topicHiddenTools := hiddenToolSetFromDecision(topicToolDecision)
 
 	// 0. Cache agent's context window on the session (first run only).
 	// Enables scheduler's adaptive throttle to use the real value instead of hardcoded 200K.
@@ -231,7 +245,7 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (result *RunResult, 
 		if req.UserID != "" {
 			l.getUserMCPTools(iterCtx, req.UserID)
 		}
-		toolDefs, allowedTools, messages = l.buildFilteredTools(&req, hadBootstrap, rs.iteration, maxIter, messages)
+		toolDefs, allowedTools, messages = l.buildFilteredTools(&req, topicHiddenTools, hadBootstrap, rs.iteration, maxIter, messages)
 
 		// Use per-request overrides if set (e.g. heartbeat uses cheaper provider/model).
 		model := l.model

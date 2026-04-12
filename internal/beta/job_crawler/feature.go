@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/beta"
+	"github.com/nextlevelbuilder/goclaw/internal/beta/topicrouting"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
@@ -70,6 +71,13 @@ func (f *JobCrawlerFeature) Init(deps beta.Deps) error {
 	if err := f.store.migrate(); err != nil {
 		return fmt.Errorf("%s migration: %w", featureName, err)
 	}
+	topicrouting.RegisterTopicFeatureTools(
+		featureName,
+		(&configUpsertTool{}).Name(),
+		(&listConfigsTool{}).Name(),
+		(&runCrawlerTool{}).Name(),
+		(&runDynamicCrawlerTool{}).Name(),
+	)
 
 	if deps.ToolRegistry != nil {
 		deps.ToolRegistry.Register(&configUpsertTool{feature: f})
@@ -98,6 +106,7 @@ func (f *JobCrawlerFeature) Init(deps beta.Deps) error {
 }
 
 func (f *JobCrawlerFeature) Shutdown(_ context.Context) error {
+	topicrouting.UnregisterTopicFeatureTools(featureName)
 	if f.schedulerCancel != nil {
 		f.schedulerCancel()
 	}

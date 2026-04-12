@@ -23,6 +23,7 @@ const (
 	ctxChannel           toolContextKey = "tool_channel"
 	ctxChannelType       toolContextKey = "tool_channel_type"
 	ctxChatID            toolContextKey = "tool_chat_id"
+	ctxThreadID          toolContextKey = "tool_thread_id"
 	ctxPeerKind          toolContextKey = "tool_peer_kind"
 	ctxReactionMediaMode toolContextKey = "tool_reaction_media_mode"
 	ctxLocalKey          toolContextKey = "tool_local_key" // composite key with topic/thread suffix for routing
@@ -52,8 +53,13 @@ func WithToolChannel(ctx context.Context, channel string) context.Context {
 }
 
 func ToolChannelFromCtx(ctx context.Context) string {
-	v, _ := ctx.Value(ctxChannel).(string)
-	return v
+	if v, _ := ctx.Value(ctxChannel).(string); v != "" {
+		return v
+	}
+	if rc := store.RunContextFromCtx(ctx); rc != nil {
+		return rc.ChannelName
+	}
+	return ""
 }
 
 func WithToolChannelType(ctx context.Context, channelType string) context.Context {
@@ -75,8 +81,27 @@ func WithToolChatID(ctx context.Context, chatID string) context.Context {
 }
 
 func ToolChatIDFromCtx(ctx context.Context) string {
-	v, _ := ctx.Value(ctxChatID).(string)
-	return v
+	if v, _ := ctx.Value(ctxChatID).(string); v != "" {
+		return v
+	}
+	if rc := store.RunContextFromCtx(ctx); rc != nil {
+		return rc.ChatID
+	}
+	return ""
+}
+
+func WithToolThreadID(ctx context.Context, threadID int) context.Context {
+	return context.WithValue(ctx, ctxThreadID, threadID)
+}
+
+func ToolThreadIDFromCtx(ctx context.Context) int {
+	if v, ok := ctx.Value(ctxThreadID).(int); ok && v > 0 {
+		return v
+	}
+	if rc := store.RunContextFromCtx(ctx); rc != nil {
+		return rc.ThreadID
+	}
+	return 0
 }
 
 func WithToolPeerKind(ctx context.Context, peerKind string) context.Context {
@@ -104,8 +129,13 @@ func WithToolLocalKey(ctx context.Context, localKey string) context.Context {
 }
 
 func ToolLocalKeyFromCtx(ctx context.Context) string {
-	v, _ := ctx.Value(ctxLocalKey).(string)
-	return v
+	if v, _ := ctx.Value(ctxLocalKey).(string); v != "" {
+		return v
+	}
+	if rc := store.RunContextFromCtx(ctx); rc != nil {
+		return rc.LocalKey
+	}
+	return ""
 }
 
 func WithToolSandboxKey(ctx context.Context, key string) context.Context {

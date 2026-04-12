@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+
+	"github.com/nextlevelbuilder/goclaw/internal/beta/topicrouting"
 )
 
 // registry holds all compiled-in beta features.
@@ -117,6 +119,8 @@ func ShutdownAll(ctx context.Context) {
 			slog.Warn("beta feature shutdown failed", "error", err)
 		}
 	}
+
+	topicrouting.Clear()
 }
 
 func activateLocked(ctx context.Context, deps Deps, f Feature) (bool, error) {

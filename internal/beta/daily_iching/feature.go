@@ -10,6 +10,7 @@ import (
 	"github.com/mymmrac/telego"
 
 	"github.com/nextlevelbuilder/goclaw/internal/beta"
+	"github.com/nextlevelbuilder/goclaw/internal/beta/topicrouting"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	telegramchannel "github.com/nextlevelbuilder/goclaw/internal/channels/telegram"
 )
@@ -73,6 +74,12 @@ func (f *DailyIChingFeature) Init(deps beta.Deps) error {
 
 	telegramchannel.RegisterDynamicCommand(&ichingCommand{feature: f})
 	f.syncTelegramMenus()
+	topicrouting.RegisterTopicFeatureTools(
+		featureName,
+		(&configureTool{}).Name(),
+		(&statusTool{}).Name(),
+		(&runTool{}).Name(),
+	)
 
 	if deps.ToolRegistry != nil {
 		deps.ToolRegistry.Register(&configureTool{feature: f})
@@ -103,6 +110,7 @@ func (f *DailyIChingFeature) Init(deps beta.Deps) error {
 
 func (f *DailyIChingFeature) Shutdown(_ context.Context) error {
 	telegramchannel.UnregisterDynamicCommand("/iching")
+	topicrouting.UnregisterTopicFeatureTools(featureName)
 	if f.schedulerCancel != nil {
 		f.schedulerCancel()
 	}

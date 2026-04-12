@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"mime"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
@@ -60,6 +61,45 @@ func overrideSessionKeyFromLocalKey(sessionKey, localKey, agentID, channel, chat
 		}
 	}
 	return sessionKey
+}
+
+// resolveRunThreadID extracts a numeric topic/thread identifier from channel metadata.
+// Topic 1 (Telegram general topic) is normalized to 0 so config lookups can treat it
+// as the chat-level default while session routing still uses the explicit topic key.
+func resolveRunThreadID(metadata map[string]string, localKey string) int {
+	if metadata != nil {
+		if raw := strings.TrimSpace(metadata[tools.MetaMessageThreadID]); raw != "" {
+			if threadID, err := strconv.Atoi(raw); err == nil {
+				if threadID <= 1 {
+					return 0
+				}
+				return threadID
+			}
+		}
+	}
+
+	localKey = strings.TrimSpace(localKey)
+	if localKey == "" {
+		return 0
+	}
+
+	var raw string
+	switch {
+	case strings.Contains(localKey, ":topic:"):
+		idx := strings.LastIndex(localKey, ":topic:")
+		raw = localKey[idx+len(":topic:"):]
+	case strings.Contains(localKey, ":thread:"):
+		idx := strings.LastIndex(localKey, ":thread:")
+		raw = localKey[idx+len(":thread:"):]
+	default:
+		return 0
+	}
+
+	threadID, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || threadID <= 1 {
+		return 0
+	}
+	return threadID
 }
 
 // extractSessionMetadata builds a metadata map from channel InboundMessage metadata.

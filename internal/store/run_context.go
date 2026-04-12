@@ -36,7 +36,11 @@ type RunContext struct {
 
 	// Tool configuration
 	BuiltinToolSettings map[string][]byte
+	ChannelName         string
 	ChannelType         string
+	ChatID              string
+	ThreadID            int
+	LocalKey            string
 	SubagentsCfg        *config.SubagentsConfig
 	ParentModel         string
 	ParentProvider      string

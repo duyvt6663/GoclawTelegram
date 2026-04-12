@@ -426,6 +426,7 @@ type RunRequest struct {
 	ChannelType       string             // platform type (e.g. "zalo_personal", "telegram") — for system prompt context
 	ChatTitle         string             // group chat display name (e.g. Telegram group title)
 	ChatID            string             // source chat ID
+	ThreadID          int                // source topic/thread ID when the channel provides one (0 = none/default)
 	PeerKind          string             // "direct" or "group" (for session key building and tool context)
 	RunID             string             // unique run identifier
 	UserID            string             // external user ID (TEXT, free-form) for multi-tenant scoping
