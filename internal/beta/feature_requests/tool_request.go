@@ -20,7 +20,7 @@ type requestFeatureTool struct {
 func (t *requestFeatureTool) Name() string { return "request_feature" }
 func (t *requestFeatureTool) Description() string {
 	return "Submit a new beta feature request. Creates an entry that is normally approved by a poll with 5 votes before building, " +
-		"though @duyvt6663 (lớp trưởng) can directly approve it. Use when a user suggests or requests a new feature to be built."
+		"though lớp trưởng / lớp phó can directly approve it. Use when a user suggests or requests a new feature to be built."
 }
 
 func (t *requestFeatureTool) Parameters() map[string]any {
@@ -78,7 +78,7 @@ func (t *requestFeatureTool) Execute(ctx context.Context, args map[string]any) *
 		"id":          req.ID,
 		"title":       req.Title,
 		"status":      req.Status,
-		"message":     fmt.Sprintf("Feature request '%s' created. It usually needs %d approval votes via a poll before building can start, unless @duyvt6663 directly approves it. Use the approve_feature_poll tool to start approval.", title, approvalThreshold),
+		"message":     fmt.Sprintf("Feature request '%s' created. It usually needs %d approval votes via a poll before building can start, unless lớp trưởng / lớp phó directly approves it. Use the approve_feature_poll tool to start approval.", title, approvalThreshold),
 		"next_action": "Create an approval poll using approve_feature_poll with this feature_id",
 	}
 	out, _ := json.Marshal(result)

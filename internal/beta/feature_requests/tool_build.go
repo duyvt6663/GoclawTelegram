@@ -84,7 +84,7 @@ type buildFeatureTool struct {
 func (t *buildFeatureTool) Name() string { return "build_feature" }
 func (t *buildFeatureTool) Description() string {
 	return "Run a Codex agent to plan and build an approved beta feature. " +
-		"The feature must be in 'approved' status (either passed the 5-vote approval poll or was directly approved by @duyvt6663). Failed builds can be retried. " +
+		"The feature must be in 'approved' status (either passed the 5-vote approval poll or was directly approved by lớp trưởng / lớp phó). Failed builds can be retried. " +
 		"Launches a background Codex CLI process that plans the architecture and implements the feature code. " +
 		"Use after a feature has been approved."
 }
@@ -231,10 +231,17 @@ func (t *buildFeatureTool) runCodex(req *FeatureRequest, retrying bool, workspac
 		t.announceBuild(req, msg)
 	}
 
-	t.enqueueBuildFollowup(req, followup, retrying, summarizeBuildFailure(output, err))
+	summary := summarizeBuildFailure(output, err)
 	if req.Status == StatusCompleted && deployResult.RestartRequested {
+		if queueErr := queueBuildFollowupForRestart(t.feature.sysConfigs, req, followup, retrying, summary); queueErr != nil {
+			slog.Warn("beta feature_requests: failed to queue post-restart build follow-up",
+				"feature_id", req.ID, "error", queueErr)
+			t.enqueueBuildFollowup(req, followup, retrying, summary)
+		}
 		t.requestGatewayRestart(req, deployResult.FeatureName)
+		return
 	}
+	t.enqueueBuildFollowup(req, followup, retrying, summary)
 }
 
 func (t *buildFeatureTool) announceBuild(req *FeatureRequest, content string) {
@@ -699,32 +706,7 @@ func (t *buildFeatureTool) enqueueBuildFollowup(req *FeatureRequest, followup *b
 		return
 	}
 
-	meta := map[string]string{
-		tools.MetaOriginChannel:  followup.Channel,
-		tools.MetaOriginPeerKind: followup.PeerKind,
-		"feature_id":             req.ID,
-		"feature_status":         req.Status,
-	}
-	if strings.TrimSpace(followup.UserID) != "" {
-		meta[tools.MetaOriginUserID] = followup.UserID
-	}
-	if strings.TrimSpace(followup.LocalKey) != "" {
-		meta[tools.MetaOriginLocalKey] = followup.LocalKey
-	}
-	if strings.TrimSpace(followup.SessionKey) != "" {
-		meta[tools.MetaOriginSessionKey] = followup.SessionKey
-	}
-
-	msg := bus.InboundMessage{
-		Channel:  tools.ChannelSystem,
-		SenderID: BuildFollowupSenderID(req.ID),
-		ChatID:   followup.ChatID,
-		Content:  buildFollowupMessage(req, retrying, summary),
-		UserID:   followup.UserID,
-		TenantID: followup.TenantID,
-		AgentID:  followup.AgentKey,
-		Metadata: meta,
-	}
+	msg := buildFollowupInboundMessage(req, followup, retrying, summary)
 
 	if !t.feature.msgBus.TryPublishInbound(msg) {
 		slog.Warn("beta feature_requests: build follow-up dropped (inbound buffer full)",

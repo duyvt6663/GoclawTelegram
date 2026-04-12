@@ -18,6 +18,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/beta"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/all"
+	featurerequests "github.com/nextlevelbuilder/goclaw/internal/beta/feature_requests"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/cache"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
@@ -1231,6 +1232,14 @@ func runGateway() {
 				slog.Info("beta features hot-activated via system_configs", "features", activated)
 			}
 		})
+	}
+	if pgStores.SystemConfigs != nil {
+		queueCtx := store.WithTenantID(context.Background(), store.MasterTenantID)
+		if published, err := featurerequests.PublishQueuedBuildFollowups(queueCtx, pgStores.SystemConfigs, msgBus); err != nil {
+			slog.Warn("feature build follow-up queue publish failed", "error", err)
+		} else if published > 0 {
+			slog.Info("feature build follow-up queue published", "count", published)
+		}
 	}
 
 	slog.Info("goclaw gateway starting",

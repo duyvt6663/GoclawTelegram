@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/nextlevelbuilder/goclaw/internal/store"
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
@@ -21,7 +22,7 @@ func (t *featurePollTool) Name() string { return "approve_feature_poll" }
 func (t *featurePollTool) Description() string {
 	return "Approve a beta feature request in a Telegram group. " +
 		"For most users, this creates a poll that needs 5 group votes before the feature can be built. " +
-		"When called by @duyvt6663 (lớp trưởng), it directly approves the feature without waiting for the poll."
+		"When called by lớp trưởng / lớp phó, it directly approves the feature without waiting for the poll."
 }
 
 func (t *featurePollTool) RequiredChannelTypes() []string { return []string{"telegram"} }
@@ -67,12 +68,17 @@ func (t *featurePollTool) Execute(ctx context.Context, args map[string]any) *too
 			return tools.ErrorResult(fmt.Sprintf("Failed to directly approve feature: %v", err))
 		}
 
+		approvedBy := prettyTelegramSenderID(store.SenderIDFromContext(ctx))
+		if approvedBy == "" {
+			approvedBy = "lớp trưởng / lớp phó"
+		}
+
 		result := map[string]any{
 			"feature_id":  req.ID,
 			"title":       req.Title,
 			"status":      req.Status,
-			"approved_by": featureRequestsLopTruong,
-			"message":     fmt.Sprintf("Feature '%s' was directly approved by %s. It can be built immediately.", req.Title, featureRequestsLopTruong),
+			"approved_by": approvedBy,
+			"message":     fmt.Sprintf("Feature '%s' was directly approved by %s. It can be built immediately.", req.Title, approvedBy),
 		}
 		out, _ := json.Marshal(result)
 		return tools.NewResult(string(out))

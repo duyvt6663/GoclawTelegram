@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nextlevelbuilder/goclaw/internal/channels"
+	"github.com/nextlevelbuilder/goclaw/internal/classroles"
 	"github.com/nextlevelbuilder/goclaw/internal/sodaubai"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -13,7 +13,6 @@ import (
 const (
 	soDauBaiListToolName   = "so_dau_bai_today"
 	soDauBaiManageToolName = "so_dau_bai_manage"
-	soDauBaiLopTruong      = "@duyvt6663"
 )
 
 type SoDauBaiTodayTool struct {
@@ -64,7 +63,7 @@ func (t *SoDauBaiManageTool) Name() string { return soDauBaiManageToolName }
 func (t *SoDauBaiManageTool) RequiredChannelTypes() []string { return []string{"telegram"} }
 
 func (t *SoDauBaiManageTool) Description() string {
-	return "Add or remove someone from today's sổ đầu bài, the temporary Telegram ignore list for the current local day. Only @duyvt6663, the lớp trưởng, is allowed to use this tool."
+	return "Add or remove someone from today's sổ đầu bài, the temporary Telegram ignore list for the current local day. Only lớp trưởng / lớp phó can use this tool."
 }
 
 func (t *SoDauBaiManageTool) Parameters() map[string]any {
@@ -145,20 +144,16 @@ func (t *SoDauBaiManageTool) Execute(ctx context.Context, args map[string]any) *
 }
 
 func ensureSoDauBaiLopTruong(ctx context.Context) error {
-	senderID := store.SenderIDFromContext(ctx)
-	if senderID == "" {
-		return fmt.Errorf("only %s can update today's sổ đầu bài", soDauBaiLopTruong)
-	}
-	if channels.SenderMatchesList(senderID, []string{soDauBaiLopTruong}) {
+	if classroles.CanCurrentActorActAsLopTruong(ctx) {
 		return nil
 	}
-	return fmt.Errorf("only %s (lớp trưởng) can update today's sổ đầu bài", soDauBaiLopTruong)
+	return fmt.Errorf("only %s (lớp trưởng) or a lớp phó can update today's sổ đầu bài", classroles.LopTruong)
 }
 
 func prettyTelegramSender(senderID string) string {
 	senderID = strings.TrimSpace(senderID)
 	if senderID == "" {
-		return soDauBaiLopTruong
+		return classroles.LopTruong
 	}
 	if idx := strings.Index(senderID, "|"); idx >= 0 && idx+1 < len(senderID) {
 		user := strings.TrimSpace(senderID[idx+1:])

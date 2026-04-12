@@ -7,11 +7,11 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/nextlevelbuilder/goclaw/internal/channels"
+	"github.com/nextlevelbuilder/goclaw/internal/classroles"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
-const featureRequestsLopTruong = "@duyvt6663"
+const featureRequestsLopTruong = classroles.LopTruong
 
 func tenantKey(id uuid.UUID) string {
 	if id == uuid.Nil {
@@ -29,7 +29,7 @@ func canDirectApproveFeature(ctx context.Context) bool {
 	if senderID == "" {
 		return false
 	}
-	return channels.SenderMatchesList(senderID, []string{featureRequestsLopTruong})
+	return classroles.CanActAsLopTruong(ctx, senderID)
 }
 
 func outboundMeta(req *FeatureRequest) map[string]string {
@@ -106,4 +106,19 @@ func truncateRunes(s string, maxRunes int) string {
 	}
 	runes := []rune(s)
 	return string(runes[:maxRunes]) + "..."
+}
+
+func prettyTelegramSenderID(senderID string) string {
+	senderID = strings.TrimSpace(senderID)
+	if senderID == "" {
+		return ""
+	}
+	if before, after, ok := strings.Cut(senderID, "|"); ok {
+		after = strings.TrimSpace(after)
+		if after != "" {
+			return "@" + strings.TrimPrefix(after, "@")
+		}
+		return strings.TrimSpace(before)
+	}
+	return senderID
 }

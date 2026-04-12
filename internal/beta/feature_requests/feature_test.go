@@ -945,6 +945,98 @@ func TestBuildFeatureToolRunCodexRequestsGatewayRestartAfterDeploy(t *testing.T)
 	}
 }
 
+func TestBuildFeatureToolRunCodexQueuesFollowupUntilAfterRestart(t *testing.T) {
+	feature := newTestFeatureFeature(t)
+	sysConfigs := newFeatureTestSystemConfigStore()
+	feature.sysConfigs = sysConfigs
+
+	req := newTestFeatureRequest("deploy-queued-followup", "")
+	req.Channel = "telegram"
+	req.ChatID = "-100999"
+	req.LocalKey = "-100999:topic:7"
+	req.Status = StatusBuilding
+	req.BuildLog = "Build started at 2026-04-10T16:00:06+07:00\n"
+	if err := feature.store.create(req); err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+
+	tool := &buildFeatureTool{
+		feature:   feature,
+		workspace: t.TempDir(),
+		maxTries:  1,
+		runner: func(_ context.Context, workspace, prompt string) (string, error) {
+			return "BUILD_ARTIFACTS: {\"feature_root\":\"internal/beta/daily_iching\",\"files\":[\"internal/beta/daily_iching/feature.go\",\"internal/beta/all/all.go\"]}", nil
+		},
+		verifier: func(_ context.Context, workspace, output string, buildStartedAt time.Time, requireFreshArtifacts bool) (string, error) {
+			return "Artifact manifest verified for internal/beta/daily_iching.\ngo build ./... passed.\ngo vet ./... passed.", nil
+		},
+		deployer: func(_ context.Context, workspace string, req *FeatureRequest, output string, followup *buildFollowupContext) (buildDeployResult, error) {
+			return buildDeployResult{
+				Detail:           "Enabled beta.daily_iching in system_configs.\nGateway binary rebuilt successfully.",
+				FeatureName:      "daily_iching",
+				RestartRequested: true,
+			}, nil
+		},
+	}
+
+	followup := &buildFollowupContext{
+		AgentKey:   "builder-bot",
+		Channel:    "telegram",
+		ChatID:     "-100999",
+		PeerKind:   "group",
+		LocalKey:   req.LocalKey,
+		SessionKey: "agent:builder-bot:telegram:group:-100999:topic:7",
+		UserID:     "group:telegram:-100999",
+		TenantID:   store.MasterTenantID,
+	}
+
+	tool.runCodex(req, false, tool.workspace, time.Now(), followup)
+
+	checkCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if msg, ok := feature.msgBus.ConsumeInbound(checkCtx); ok {
+		t.Fatalf("unexpected immediate build follow-up before restart: %+v", msg)
+	}
+
+	queueCtx := store.WithTenantID(context.Background(), store.MasterTenantID)
+	values, err := sysConfigs.List(queueCtx)
+	if err != nil {
+		t.Fatalf("list queued follow-ups: %v", err)
+	}
+	if _, ok := values[buildFollowupQueueKey(req.ID)]; !ok {
+		t.Fatalf("expected queued follow-up config %q", buildFollowupQueueKey(req.ID))
+	}
+
+	published, err := PublishQueuedBuildFollowups(queueCtx, sysConfigs, feature.msgBus)
+	if err != nil {
+		t.Fatalf("PublishQueuedBuildFollowups: %v", err)
+	}
+	if published != 1 {
+		t.Fatalf("published queued follow-ups = %d, want 1", published)
+	}
+
+	msgCtx, msgCancel := context.WithTimeout(context.Background(), time.Second)
+	defer msgCancel()
+	msg, ok := feature.msgBus.ConsumeInbound(msgCtx)
+	if !ok {
+		t.Fatal("expected queued build follow-up inbound message")
+	}
+	if !IsBuildFollowupSender(msg.SenderID) {
+		t.Fatalf("sender_id = %q, want queued feature-build follow-up sender", msg.SenderID)
+	}
+	if msg.Metadata[tools.MetaOriginSessionKey] != followup.SessionKey {
+		t.Fatalf("origin session_key = %q, want %q", msg.Metadata[tools.MetaOriginSessionKey], followup.SessionKey)
+	}
+
+	values, err = sysConfigs.List(queueCtx)
+	if err != nil {
+		t.Fatalf("list queued follow-ups after publish: %v", err)
+	}
+	if _, ok := values[buildFollowupQueueKey(req.ID)]; ok {
+		t.Fatalf("queued follow-up config %q still present after publish", buildFollowupQueueKey(req.ID))
+	}
+}
+
 func newTestFeatureStore(t *testing.T) *featureStore {
 	t.Helper()
 
