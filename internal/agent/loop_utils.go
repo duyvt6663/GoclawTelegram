@@ -16,11 +16,10 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
-
-// scanWebToolResult checks web_fetch/web_search tool results for prompt injection patterns.
+// scanWebToolResult checks web-derived tool results for prompt injection patterns.
 // If detected, prepends a warning (doesn't block — may be false positive).
 func (l *Loop) scanWebToolResult(toolName string, result *tools.Result) {
-	if (toolName != "web_fetch" && toolName != "web_search") || l.inputGuard == nil {
+	if (toolName != "web_fetch" && toolName != "web_search" && toolName != "linkup_web_search") || l.inputGuard == nil {
 		return
 	}
 	if injMatches := l.inputGuard.Scan(result.ForLLM); len(injMatches) > 0 {

@@ -367,6 +367,7 @@ var toolStatusMap = map[string]string{
 	"exec": "⚡ Running code...",
 	// Web
 	"web_search":                    "🔍 Searching the web...",
+	"linkup_web_search":             "🔍 Searching the web with Linkup...",
 	"web_fetch":                     "🔍 Fetching web content...",
 	"find_and_post_meme":            "🖼 Finding an online meme image...",
 	"find_and_post_local_meme":      "🎬 Picking a local meme GIF/video...",

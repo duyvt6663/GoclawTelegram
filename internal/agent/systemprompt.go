@@ -81,6 +81,7 @@ var coreToolSummaries = map[string]string{
 	"memory_get":                    "Read specific sections of memory files",
 	"spawn":                         "Spawn a self-clone subagent to handle a task in the background",
 	"web_search":                    "Search the web",
+	"linkup_web_search":             "Search the web with Linkup for concise factual answers with sources",
 	"web_fetch":                     "Fetch and extract content from a URL",
 	"datetime":                      "Get current date/time with timezone support — use before creating cron jobs or time-sensitive operations",
 	"cron":                          "Manage scheduled jobs and reminders — use for user-requested tasks at specific times or intervals (e.g. 'remind me at 9am', 'check weather every morning')",
