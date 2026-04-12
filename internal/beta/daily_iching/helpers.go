@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"golang.org/x/text/runes"
@@ -32,7 +33,7 @@ const (
 	triggerKindManual    = "manual"
 	triggerKindCommand   = "command"
 
-	bookIndexVersion = 3
+	bookIndexVersion = 4
 )
 
 var (
@@ -188,12 +189,14 @@ func withinWindow(minuteOfDay, dueMinute int) bool {
 }
 
 func cleanText(value string) string {
+	value = canonicalUnicodeText(value)
 	value = strings.ReplaceAll(value, "\u00a0", " ")
 	value = strings.ReplaceAll(value, "\t", " ")
 	return whitespaceCollapse.ReplaceAllString(strings.TrimSpace(value), " ")
 }
 
 func cleanSourceLine(value string) string {
+	value = canonicalUnicodeText(value)
 	value = strings.ReplaceAll(value, "\u00a0", " ")
 	value = strings.ReplaceAll(value, "\t", " ")
 	value = strings.ReplaceAll(value, "\r", "")
@@ -201,7 +204,6 @@ func cleanSourceLine(value string) string {
 	if value == "" {
 		return ""
 	}
-	value = strings.ReplaceAll(value, "�", "")
 	value = whitespaceCollapse.ReplaceAllString(value, " ")
 	return strings.TrimSpace(value)
 }
@@ -219,6 +221,25 @@ func stripDiacritics(value string) string {
 		return value
 	}
 	return normalized
+}
+
+func canonicalUnicodeText(value string) string {
+	if value == "" {
+		return ""
+	}
+	value = norm.NFC.String(value)
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == utf8.RuneError, r == '�':
+			return -1
+		case r == '\u00a0':
+			return ' '
+		case unicode.IsControl(r) && r != '\n' && r != '\t':
+			return -1
+		default:
+			return r
+		}
+	}, value)
 }
 
 func normalizeComparableText(value string) string {
@@ -247,7 +268,7 @@ func tokenizeComparableText(value string) []string {
 	seen := make(map[string]struct{})
 	var out []string
 	for _, token := range strings.Fields(normalized) {
-		if len(token) < 2 {
+		if runeLen(token) < 2 {
 			continue
 		}
 		if _, ok := seen[token]; ok {
@@ -257,6 +278,106 @@ func tokenizeComparableText(value string) []string {
 		out = append(out, token)
 	}
 	return out
+}
+
+func ocrTextNoisePenalty(value string) int {
+	value = cleanSourceLine(value)
+	if value == "" {
+		return 100
+	}
+
+	normalized := normalizeComparableText(value)
+	if normalized == "" {
+		return 100
+	}
+
+	penalty := 0
+	for _, phrase := range []string{
+		"dich kinh tuong giai",
+		"thu giang nguyen duy can",
+		"nha xuat ban tre",
+		"tong bien tap",
+	} {
+		if strings.Contains(normalized, phrase) {
+			penalty += 30
+		}
+	}
+
+	letters := 0
+	digits := 0
+	other := 0
+	for _, r := range value {
+		switch {
+		case unicode.IsLetter(r):
+			letters++
+		case unicode.IsDigit(r):
+			digits++
+		case unicode.IsSpace(r):
+		default:
+			other++
+		}
+	}
+	if letters == 0 {
+		return 100
+	}
+	if other > letters/3 {
+		penalty += 12
+	}
+	if other > letters {
+		penalty += 18
+	}
+
+	tokens := strings.Fields(normalized)
+	if len(tokens) == 0 {
+		return 100
+	}
+	if digits >= 2 && len(tokens) <= 4 {
+		penalty += minInt(digits*2, 12)
+	}
+
+	shortTokens := 0
+	longTokens := 0
+	brokenTokens := 0
+	for _, token := range tokens {
+		length := runeLen(token)
+		if length <= 2 {
+			shortTokens++
+		}
+		if length >= 4 {
+			longTokens++
+		}
+		if strings.IndexFunc(token, unicode.IsDigit) >= 0 {
+			brokenTokens++
+		}
+		switch token {
+		case "aa", "ae", "ee", "fe", "ll", "mm", "oe":
+			brokenTokens++
+		}
+	}
+	if shortTokens*2 >= len(tokens) {
+		penalty += 18
+	}
+	if len(tokens) <= 3 && longTokens == 0 {
+		penalty += 18
+	}
+	if len(tokens) <= 2 && letters <= 8 {
+		penalty += 18
+	}
+	if brokenTokens > 0 {
+		penalty += minInt(brokenTokens*6, 24)
+	}
+	return penalty
+}
+
+func isLikelyNoisyOCRText(value string) bool {
+	return ocrTextNoisePenalty(value) >= 30
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func containsAnyToken(haystack string, tokens []string) bool {
@@ -288,6 +409,40 @@ func countTokenHits(haystack string, tokens []string) int {
 		}
 	}
 	return score
+}
+
+func countTokenOverlap(haystackTokens, queryTokens []string) int {
+	if len(haystackTokens) == 0 || len(queryTokens) == 0 {
+		return 0
+	}
+	haystack := make(map[string]struct{}, len(haystackTokens))
+	for _, token := range haystackTokens {
+		if token == "" {
+			continue
+		}
+		haystack[token] = struct{}{}
+	}
+	score := 0
+	for _, token := range queryTokens {
+		if token == "" {
+			continue
+		}
+		if _, ok := haystack[token]; ok {
+			score++
+		}
+	}
+	return score
+}
+
+func normalizedTokenSet(value string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, token := range strings.Fields(strings.TrimSpace(value)) {
+		if token == "" {
+			continue
+		}
+		out[token] = struct{}{}
+	}
+	return out
 }
 
 func consonantSkeletonComparableText(value string) string {
@@ -355,4 +510,24 @@ func boolToInt(value bool) int {
 
 func intToBool(value int) bool {
 	return value != 0
+}
+
+func runeLen(value string) int {
+	return utf8.RuneCountInString(value)
+}
+
+func trimRunes(value string, limit int) string {
+	if limit <= 0 || runeLen(value) <= limit {
+		return value
+	}
+	var b strings.Builder
+	count := 0
+	for _, r := range value {
+		if count >= limit {
+			break
+		}
+		b.WriteRune(r)
+		count++
+	}
+	return strings.TrimSpace(b.String())
 }

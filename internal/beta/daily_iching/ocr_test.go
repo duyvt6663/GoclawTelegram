@@ -4,15 +4,22 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestResolveBookTextExtractorAutoFallsBackToPlainWhenVieMissing(t *testing.T) {
-	t.Setenv(bookTextExtractorEnv, bookTextExtractorAuto)
-	withStubbedOCRCommands(t, "eng\nosd\n")
+type extractorStubOptions struct {
+	Available        map[string]bool
+	TesseractLangs   string
+	PDFToTextVersion string
+}
 
-	got, forced, err := resolveBookTextExtractor()
+func TestResolveBookTextExtractorAutoFallsBackToPlainWhenNoBetterBackend(t *testing.T) {
+	t.Setenv(bookTextExtractorEnv, bookTextExtractorAuto)
+	withStubbedExtractorCommands(t, extractorStubOptions{})
+
+	got, forced, err := resolveBookTextExtractor(t.TempDir())
 	if err != nil {
 		t.Fatalf("resolveBookTextExtractor() error = %v", err)
 	}
@@ -24,11 +31,33 @@ func TestResolveBookTextExtractorAutoFallsBackToPlainWhenVieMissing(t *testing.T
 	}
 }
 
+func TestResolveBookTextExtractorAutoPrefersPDFToText(t *testing.T) {
+	t.Setenv(bookTextExtractorEnv, bookTextExtractorAuto)
+	withStubbedExtractorCommands(t, extractorStubOptions{
+		Available:        map[string]bool{"pdftotext": true},
+		PDFToTextVersion: "pdftotext version 26.04.0",
+	})
+
+	got, forced, err := resolveBookTextExtractor(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolveBookTextExtractor() error = %v", err)
+	}
+	if forced {
+		t.Fatal("resolveBookTextExtractor() forced = true, want false")
+	}
+	if !isPDFToTextExtractor(got) {
+		t.Fatalf("resolveBookTextExtractor() = %q, want pdftotext cache key", got)
+	}
+}
+
 func TestResolveBookTextExtractorForcedTesseractRequiresVie(t *testing.T) {
 	t.Setenv(bookTextExtractorEnv, bookTextExtractorTesseract)
-	withStubbedOCRCommands(t, "eng\nosd\n")
+	withStubbedExtractorCommands(t, extractorStubOptions{
+		Available:      map[string]bool{"tesseract": true, "gs": true},
+		TesseractLangs: "eng\nosd\n",
+	})
 
-	_, forced, err := resolveBookTextExtractor()
+	_, forced, err := resolveBookTextExtractor(t.TempDir())
 	if err == nil {
 		t.Fatal("resolveBookTextExtractor() error = nil, want missing-vie error")
 	}
@@ -40,18 +69,42 @@ func TestResolveBookTextExtractorForcedTesseractRequiresVie(t *testing.T) {
 	}
 }
 
-func withStubbedOCRCommands(t *testing.T, tesseractLangsOutput string) {
+func TestResolveTesseractOCRConfigPrefersLocalTessdataDir(t *testing.T) {
+	sourceRoot := t.TempDir()
+	tessdataDir := filepath.Join(sourceRoot, localTessdataDirName)
+	if err := os.MkdirAll(tessdataDir, 0o755); err != nil {
+		t.Fatalf("mkdir tessdata dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tessdataDir, "vie.traineddata"), []byte("stub"), 0o644); err != nil {
+		t.Fatalf("write vie.traineddata: %v", err)
+	}
+	withStubbedExtractorCommands(t, extractorStubOptions{
+		Available:      map[string]bool{"tesseract": true, "gs": true},
+		TesseractLangs: "eng\nvie\n",
+	})
+
+	cfg, err := resolveTesseractOCRConfig(sourceRoot)
+	if err != nil {
+		t.Fatalf("resolveTesseractOCRConfig() error = %v", err)
+	}
+	if cfg.TessdataDir != tessdataDir {
+		t.Fatalf("resolveTesseractOCRConfig() tessdata_dir = %q, want %q", cfg.TessdataDir, tessdataDir)
+	}
+	if cfg.Langs != "vie" {
+		t.Fatalf("resolveTesseractOCRConfig() langs = %q, want %q", cfg.Langs, "vie")
+	}
+}
+
+func withStubbedExtractorCommands(t *testing.T, opts extractorStubOptions) {
 	t.Helper()
 
 	prevLookPath := execLookPath
 	prevExecCommand := execCommand
 	execLookPath = func(file string) (string, error) {
-		switch file {
-		case "gs", "tesseract":
+		if opts.Available[file] {
 			return "/usr/bin/" + file, nil
-		default:
-			return "", exec.ErrNotFound
 		}
+		return "", exec.ErrNotFound
 	}
 	execCommand = func(name string, args ...string) *exec.Cmd {
 		cmdArgs := []string{"-test.run=TestOCRHelperProcess", "--", name}
@@ -59,7 +112,8 @@ func withStubbedOCRCommands(t *testing.T, tesseractLangsOutput string) {
 		cmd := exec.Command(os.Args[0], cmdArgs...)
 		cmd.Env = append(os.Environ(),
 			"GO_WANT_OCR_HELPER_PROCESS=1",
-			"GO_OCR_HELPER_TESSERACT_LANGS="+tesseractLangsOutput,
+			"GO_OCR_HELPER_TESSERACT_LANGS="+opts.TesseractLangs,
+			"GO_OCR_HELPER_PDFTOTEXT_VERSION="+opts.PDFToTextVersion,
 		)
 		return cmd
 	}
@@ -92,6 +146,9 @@ func TestOCRHelperProcess(t *testing.T) {
 	case name == "tesseract" && len(cmdArgs) == 1 && cmdArgs[0] == "--list-langs":
 		_, _ = io.WriteString(os.Stdout, "List of available languages in \"/tmp\" (0):\n")
 		_, _ = io.WriteString(os.Stdout, os.Getenv("GO_OCR_HELPER_TESSERACT_LANGS"))
+		os.Exit(0)
+	case name == "pdftotext" && len(cmdArgs) == 1 && cmdArgs[0] == "-v":
+		_, _ = io.WriteString(os.Stdout, os.Getenv("GO_OCR_HELPER_PDFTOTEXT_VERSION"))
 		os.Exit(0)
 	default:
 		os.Exit(2)

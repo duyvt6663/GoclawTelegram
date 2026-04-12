@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -434,7 +433,7 @@ func (f *DailyIChingFeature) groundingForHexagram(number int) (groundingContext,
 		return groundingContext{}, fmt.Errorf("hexagram %d is missing from the local book index", number)
 	}
 
-	overview := summarizeChunks(section.Chunks, 2)
+	overview := summarizeChunks(selectSectionChunks(section, "overview"), 2)
 	practical := summarizeChunks(selectSectionChunks(section, "ha"), 2)
 	philosophical := summarizeChunks(selectSectionChunks(section, "thuong"), 2)
 	if practical == "" {
@@ -456,67 +455,73 @@ func selectSectionChunks(section *hexagramSection, kind string) []bookChunk {
 	if section == nil || len(section.Chunks) == 0 {
 		return nil
 	}
-	type scoredChunk struct {
-		score int
-		index int
+	if kind == "overview" {
+		return fallbackSectionChunks(section, 3)
+	}
+	query := section.Name + " " + section.Title
+	switch kind {
+	case "ha":
+		query += " hình nhi hạ ứng xử thực hành quân tử"
+	case "thuong":
+		query += " hình nhi thượng đại tượng đạo lý nguyên lý"
+	default:
+		query += " tượng quẻ ý chính"
 	}
 
-	var ranked []scoredChunk
-	for i, chunk := range section.Chunks {
-		score := 0
-		switch kind {
-		case "ha":
-			if strings.Contains(chunk.Normalized, "duoi day ban ve phan hinh nhi ha") {
-				score += 40
-			}
-			if chunk.HasHa {
-				score += 20
-			}
-		case "thuong":
-			if strings.Contains(chunk.Normalized, "hinh nhi thuong") {
-				score += 25
-			}
-			if strings.Contains(chunk.Normalized, "dai tuong") {
-				score += 10
-			}
-			if chunk.HasThuong {
-				score += 20
-			}
-		}
-		score += countTokenHits(chunk.Normalized, tokenizeComparableText(section.Name+" "+section.Title))
-		if score > 0 {
-			ranked = append(ranked, scoredChunk{score: score, index: i})
-		}
-	}
+	ranked := rankSectionChunks(section, query, 3)
 	if len(ranked) == 0 {
-		if len(section.Chunks) > 3 {
-			return append([]bookChunk(nil), section.Chunks[:3]...)
-		}
-		return append([]bookChunk(nil), section.Chunks...)
+		return fallbackSectionChunks(section, 3)
 	}
-
-	sort.Slice(ranked, func(i, j int) bool {
-		if ranked[i].score != ranked[j].score {
-			return ranked[i].score > ranked[j].score
-		}
-		return ranked[i].index < ranked[j].index
-	})
 
 	seen := make(map[int]struct{})
 	var selected []bookChunk
 	for _, item := range ranked {
-		for _, idx := range []int{item.index, item.index + 1} {
+		for _, idx := range []int{item.chunk.Order, item.chunk.Order + 1} {
 			if idx < 0 || idx >= len(section.Chunks) {
 				continue
 			}
 			if _, ok := seen[idx]; ok {
 				continue
 			}
+			chunk := section.Chunks[idx]
+			if isLikelyNoisyOCRText(chunk.Text) {
+				continue
+			}
 			seen[idx] = struct{}{}
-			selected = append(selected, section.Chunks[idx])
+			selected = append(selected, chunk)
 			if len(selected) >= 3 {
 				return selected
 			}
+		}
+	}
+	if len(selected) == 0 {
+		return fallbackSectionChunks(section, 3)
+	}
+	return selected
+}
+
+func fallbackSectionChunks(section *hexagramSection, limit int) []bookChunk {
+	if section == nil || len(section.Chunks) == 0 || limit <= 0 {
+		return nil
+	}
+
+	selected := make([]bookChunk, 0, limit)
+	appendChunk := func(chunk bookChunk) bool {
+		selected = append(selected, chunk)
+		return len(selected) >= limit
+	}
+
+	for _, chunk := range section.Chunks {
+		if isLikelyNoisyOCRText(chunk.Text) {
+			continue
+		}
+		if appendChunk(chunk) {
+			return selected
+		}
+	}
+	for _, chunk := range section.Chunks {
+		if appendChunk(chunk) {
+			return selected
 		}
 	}
 	return selected
@@ -572,6 +577,9 @@ func isReadableSentence(sentence string) bool {
 	}
 	normalized := normalizeComparableText(sentence)
 	if normalized == "" {
+		return false
+	}
+	if isLikelyNoisyOCRText(sentence) {
 		return false
 	}
 	if strings.Contains(normalized, "nguyen duy can") || strings.Contains(normalized, "dich kinh tuong giai") {

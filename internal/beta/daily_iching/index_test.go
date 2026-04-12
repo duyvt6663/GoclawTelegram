@@ -2,6 +2,7 @@ package dailyiching
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -202,6 +203,53 @@ func TestFindHexagramStartUsesWindowContextForCorruptedHeading(t *testing.T) {
 	}
 }
 
+func TestShouldSkipSourceLineSkipsHeaderAndArtifactNoise(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		line string
+		want bool
+	}{
+		{line: "112 Thu Giang NGUYÊN DUY CẦN", want: true},
+		{line: "DỊCH KINH TƯỜNG GIẢI 113", want: true},
+		{line: "D0, FE", want: true},
+		{line: "—aa.ea", want: true},
+		{line: "LỜI NÓI ĐẦU", want: false},
+		{line: "Quẻ có 6 hào dương.", want: false},
+	}
+
+	for _, tc := range cases {
+		if got := shouldSkipSourceLine(tc.line); got != tc.want {
+			t.Fatalf("shouldSkipSourceLine(%q) = %v, want %v", tc.line, got, tc.want)
+		}
+	}
+}
+
+func TestChunkHexagramTextTrimsLeadingOCRNoise(t *testing.T) {
+	t.Parallel()
+
+	text := strings.Join([]string{
+		"1. BAT THUAN KIEN",
+		"LL",
+		"D0, FE",
+		"—aa.ea",
+		"Kiền: Sức sáng tạo hoặc Đấng Tạo hóa",
+		"Quẻ có 6 hào dương. Hào dương là nguyên lực rất mạnh và rất hoạt động.",
+	}, "\n")
+
+	chunks := chunkHexagramText(text)
+	if len(chunks) == 0 {
+		t.Fatal("chunkHexagramText() returned no chunks")
+	}
+	first := normalizeComparableText(chunks[0].Text)
+	if strings.Contains(first, "bat thuan kien") {
+		t.Fatalf("first chunk still contains OCR heading noise: %q", chunks[0].Text)
+	}
+	if !strings.Contains(first, "kien suc sang tao") {
+		t.Fatalf("first chunk = %q, want cleaned opening content", chunks[0].Text)
+	}
+}
+
 func TestBuildBookIndexFromLocalBooks(t *testing.T) {
 	sourceRoot := findLocalBookSourceRoot(t)
 
@@ -225,7 +273,7 @@ func TestBuildBookIndexFromLocalBooks(t *testing.T) {
 	if q16.DisplaySource == "" || q16.Heading == "" || len(q16.Chunks) == 0 {
 		t.Fatalf("section 16 incomplete: source=%q heading=%q chunks=%d", q16.DisplaySource, q16.Heading, len(q16.Chunks))
 	}
-	if shouldSkipSourceLine(q16.Heading) {
+	if shouldSkipHeadingScanLine(q16.Heading) {
 		t.Fatalf("section 16 heading should not be a page header: %q", q16.Heading)
 	}
 
@@ -235,6 +283,43 @@ func TestBuildBookIndexFromLocalBooks(t *testing.T) {
 	}
 	if q64.DisplaySource == "" || q64.Heading == "" || len(q64.Chunks) == 0 {
 		t.Fatalf("section 64 incomplete: source=%q heading=%q chunks=%d", q64.DisplaySource, q64.Heading, len(q64.Chunks))
+	}
+}
+
+func TestBuildBookIndexFromLocalBooksWithPDFToText(t *testing.T) {
+	sourceRoot := findLocalBookSourceRoot(t)
+
+	if _, err := exec.LookPath("pdftotext"); err != nil {
+		t.Skip("pdftotext not installed")
+	}
+
+	sources, err := listBookSourceFiles(sourceRoot)
+	if err != nil {
+		t.Fatalf("listBookSourceFiles() error = %v", err)
+	}
+
+	index, err := buildBookIndexWithExtractor(sourceRoot, sources, bookTextExtractorPDFToText)
+	if err != nil {
+		t.Fatalf("buildBookIndexWithExtractor() error = %v", err)
+	}
+	if got, want := len(index.Sections), len(kingWenSequence); got != want {
+		t.Fatalf("len(index.Sections) = %d, want %d", got, want)
+	}
+
+	q16 := index.sectionByNumber(16)
+	if q16 == nil {
+		t.Fatal("section 16 missing from built index")
+	}
+	if !strings.Contains(normalizeComparableText(q16.Heading), normalizeComparableText("16. LÔI ĐỊA DỰ")) {
+		t.Fatalf("section 16 heading = %q, want LÔI ĐỊA DỰ", q16.Heading)
+	}
+
+	q17 := index.sectionByNumber(17)
+	if q17 == nil {
+		t.Fatal("section 17 missing from built index")
+	}
+	if !strings.Contains(normalizeComparableText(q17.Heading), normalizeComparableText("17. TRẠCH LÔI TÙY")) {
+		t.Fatalf("section 17 heading = %q, want TRẠCH LÔI TÙY", q17.Heading)
 	}
 }
 
@@ -270,6 +355,58 @@ func TestFindHexagramStartFromLocalUpperVolumeAroundQ15Q17(t *testing.T) {
 		{number: 15, wantHeading: "15."},
 		{number: 16, wantHeading: "LI D"},
 		{number: 17, wantHeading: "TRCH LI TY"},
+	}
+
+	for _, tc := range cases {
+		meta := kingWenSequence[tc.number-1]
+		idx := findHexagramStart(doc.Lines, linePos, meta)
+		if idx < 0 {
+			t.Fatalf("findHexagramStart(%d) returned %d", tc.number, idx)
+		}
+		got := cleanSourceLine(doc.Lines[idx])
+		if !strings.Contains(normalizeComparableText(got), normalizeComparableText(tc.wantHeading)) {
+			t.Fatalf("findHexagramStart(%d) heading = %q, want it to contain %q", tc.number, got, tc.wantHeading)
+		}
+		linePos = idx + 1
+	}
+}
+
+func TestFindHexagramStartFromLocalUpperVolumeAroundQ15Q17WithPDFToText(t *testing.T) {
+	sourceRoot := findLocalBookSourceRoot(t)
+
+	if _, err := exec.LookPath("pdftotext"); err != nil {
+		t.Skip("pdftotext not installed")
+	}
+
+	sources, err := listBookSourceFiles(sourceRoot)
+	if err != nil {
+		t.Fatalf("listBookSourceFiles() error = %v", err)
+	}
+
+	var upper bookSourceFile
+	for _, source := range sources {
+		if source.VolumeOrder == 0 {
+			upper = source
+			break
+		}
+	}
+	if upper.Path == "" {
+		t.Fatal("upper volume source missing")
+	}
+
+	doc, err := parsePDFSource(upper, bookTextExtractorPDFToText)
+	if err != nil {
+		t.Fatalf("parsePDFSource() error = %v", err)
+	}
+
+	linePos := 0
+	cases := []struct {
+		number      int
+		wantHeading string
+	}{
+		{number: 15, wantHeading: "15. ĐỊA SƠN KHIÊM"},
+		{number: 16, wantHeading: "16. LÔI ĐỊA DỰ"},
+		{number: 17, wantHeading: "17. TRẠCH LÔI TÙY"},
 	}
 
 	for _, tc := range cases {
