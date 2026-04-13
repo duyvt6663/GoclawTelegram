@@ -32,6 +32,7 @@ type SystemPromptConfig struct {
 	OwnerIDs      []string                // owner sender IDs
 	Mode          PromptMode              // full or minimal
 	ToolNames     []string                // registered tool names
+	ToolDescs     map[string]string       // live tool descriptions from the registry
 	SkillsSummary string                  // XML from skills.Loader.BuildSummary()
 	HasMemory     bool                    // memory_search/memory_get available?
 	HasSpawn      bool                    // spawn tool available?
@@ -207,7 +208,7 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 	}
 
 	// 2. ## Tooling
-	lines = append(lines, buildToolingSection(cfg.ToolNames, cfg.SandboxEnabled, cfg.ShellDenyGroups)...)
+	lines = append(lines, buildToolingSection(cfg.ToolNames, cfg.ToolDescs, cfg.SandboxEnabled, cfg.ShellDenyGroups)...)
 
 	// 2.5. Credentialed CLI context (appended after tooling, before safety) — skip during bootstrap
 	if !cfg.IsBootstrap && cfg.CredentialCLIContext != "" {
@@ -343,7 +344,7 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 
 // --- Section builders ---
 
-func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups map[string]bool) []string {
+func buildToolingSection(toolNames []string, toolDescs map[string]string, hasSandbox bool, shellDenyGroups map[string]bool) []string {
 	lines := []string{
 		"## Tooling",
 		"",
@@ -357,7 +358,10 @@ func buildToolingSection(toolNames []string, hasSandbox bool, shellDenyGroups ma
 		if strings.HasPrefix(name, "mcp_") && name != "mcp_tool_search" {
 			continue
 		}
-		desc := coreToolSummaries[name]
+		desc := strings.TrimSpace(toolDescs[name])
+		if desc == "" {
+			desc = coreToolSummaries[name]
+		}
 		if desc == "" {
 			desc = "(custom tool)"
 		}

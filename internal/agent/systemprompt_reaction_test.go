@@ -48,3 +48,16 @@ func TestBuildSystemPrompt_NoTelegramReactionMediaHintWithoutTelegram(t *testing
 		t.Fatalf("unexpected reaction media hint in non-Telegram prompt:\n%s", prompt)
 	}
 }
+
+func TestBuildSystemPrompt_PrefersLiveToolDescriptions(t *testing.T) {
+	prompt := BuildSystemPrompt(SystemPromptConfig{
+		ToolNames: []string{"linkup_web_search"},
+		ToolDescs: map[string]string{
+			"linkup_web_search": "Search the web with Linkup and return a concise factual answer plus source links. Use deep mode for slower, broader coverage.",
+		},
+	})
+
+	if !strings.Contains(prompt, "Use deep mode for slower, broader coverage.") {
+		t.Fatalf("expected live tool description in prompt, got:\n%s", prompt)
+	}
+}

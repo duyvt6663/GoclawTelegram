@@ -96,6 +96,23 @@ func (l *Loop) buildMCPToolDescs(toolNames []string) map[string]string {
 	return descs
 }
 
+// buildToolDescs extracts live descriptions for the currently visible tools.
+// This keeps the human-readable system prompt aligned with the actual registry.
+func (l *Loop) buildToolDescs(toolNames []string) map[string]string {
+	descs := make(map[string]string, len(toolNames))
+	for _, name := range toolNames {
+		if tool, ok := l.tools.Get(name); ok {
+			if desc := strings.TrimSpace(tool.Description()); desc != "" {
+				descs[name] = desc
+			}
+		}
+	}
+	if len(descs) == 0 {
+		return nil
+	}
+	return descs
+}
+
 // buildMessages constructs the full message list for an LLM request.
 // Returns the messages and whether BOOTSTRAP.md was present in context files
 // (used by the caller for auto-cleanup without an extra DB roundtrip).
@@ -213,6 +230,7 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		toolNames = filterBootstrapTools(toolNames)
 		mcpToolDescs = nil
 	}
+	toolDescs := l.buildToolDescs(toolNames)
 
 	// Resolve team members so agent knows who to assign tasks to.
 	var teamMembers []store.TeamMemberData
@@ -233,6 +251,7 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		OwnerIDs:               l.ownerIDs,
 		Mode:                   mode,
 		ToolNames:              toolNames,
+		ToolDescs:              toolDescs,
 		SkillsSummary:          l.resolveSkillsSummary(ctx, skillFilter),
 		HasMemory:              l.hasMemory,
 		HasSpawn:               l.tools != nil && hasSpawn,
