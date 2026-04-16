@@ -491,6 +491,10 @@ func sanitizeHistory(msgs []providers.Message) ([]providers.Message, int) {
 	for i := start; i < len(msgs); i++ {
 		msg := msgs[i]
 
+		if msg.Role == "assistant" && msg.Content != "" {
+			msg.Content = SanitizeAssistantContent(msg.Content)
+		}
+
 		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
 			// Deep-copy ToolCalls to avoid mutating the original session history.
 			oldCalls := msg.ToolCalls

@@ -12,11 +12,12 @@
 //	     - collapseConsecutiveDuplicateBlocks()
 //
 // Additional Go-specific:
-//	  5. stripEchoedSystemMessages()       → strip hallucinated [System Message] blocks
-//	  6. stripGarbledToolXML()             → strip garbled XML from models like DeepSeek
+//  5. stripEchoedSystemMessages()       → strip hallucinated [System Message] blocks
+//  6. stripGarbledToolXML()             → strip garbled XML from models like DeepSeek
 package agent
 
 import (
+	"encoding/json"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -123,10 +124,21 @@ func stripGarbledToolXML(content string) string {
 // --- 2. Downgraded tool call text ---
 
 // stripDowngradedToolCallText removes [Tool Call: ...], [Tool Result ...],
-// and [Historical context: ...] blocks that some models emit as text.
+// [Historical context: ...] blocks, and plain-text pseudo tool invocations
+// like `{"x":1} to=functions.some_tool` that some models emit as text.
 // Matching TS stripDowngradedToolCallText().
 // Uses line-by-line scanning (Go regexp doesn't support lookahead).
 func stripDowngradedToolCallText(content string) string {
+	if containsPlainTextToolCallArtifact(content) {
+		cleaned := stripPlainTextToolCallArtifacts(content)
+		if cleaned == "" && strings.TrimSpace(content) != "" {
+			slog.Warn("stripped entire response as downgraded plain-text tool call",
+				"original_len", len(content),
+			)
+		}
+		content = cleaned
+	}
+
 	if !strings.Contains(content, "[Tool Call:") &&
 		!strings.Contains(content, "[Tool Result") &&
 		!strings.Contains(content, "[Historical context:") {
@@ -165,11 +177,151 @@ func stripDowngradedToolCallText(content string) string {
 	return strings.TrimSpace(strings.Join(result, "\n"))
 }
 
+func containsPlainTextToolCallArtifact(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		if lineLooksLikePlainTextToolCall(strings.TrimSpace(line)) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeDowngradedToolCallText(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return false
+	}
+	if looksLikeJSONToolEnvelope(trimmed) {
+		return true
+	}
+	if strings.Contains(trimmed, "[Tool Call:") ||
+		strings.Contains(trimmed, "[Tool Result") ||
+		strings.Contains(trimmed, "[Historical context:") {
+		return true
+	}
+
+	lower := strings.ToLower(trimmed)
+	if !strings.Contains(lower, "to=functions.") {
+		return false
+	}
+
+	if strings.HasPrefix(trimmed, "{") ||
+		strings.HasPrefix(trimmed, "[") ||
+		strings.HasPrefix(trimmed, "\"") ||
+		strings.HasPrefix(lower, "to=functions.") ||
+		strings.HasPrefix(lower, "json to=functions.") {
+		return true
+	}
+
+	// Models often emit this as a short single-line pseudo call with a JSON blob
+	// plus some trailing garbage tokens. Treat that as a downgraded tool call too.
+	return !strings.Contains(trimmed, "\n") && len(trimmed) <= 1200
+}
+
+func stripPlainTextToolCallArtifacts(content string) string {
+	lines := strings.Split(content, "\n")
+	var result []string
+	skipping := false
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+
+		if lineLooksLikePlainTextToolCall(trimmed) {
+			skipping = true
+			continue
+		}
+
+		if skipping {
+			// Models often split the pseudo call over multiple lines: JSON first,
+			// then `to=functions.<tool>`, then stray tokens.
+			if trimmed == "" ||
+				strings.HasPrefix(trimmed, "{") ||
+				strings.HasPrefix(trimmed, "}") ||
+				strings.HasPrefix(trimmed, "[") ||
+				strings.HasPrefix(trimmed, "]") ||
+				strings.HasPrefix(trimmed, "\"") ||
+				strings.HasPrefix(lower, "json") {
+				continue
+			}
+			skipping = false
+		}
+
+		result = append(result, line)
+	}
+
+	return strings.TrimSpace(strings.Join(result, "\n"))
+}
+
+func lineLooksLikePlainTextToolCall(trimmed string) bool {
+	if trimmed == "" {
+		return false
+	}
+	if looksLikeJSONToolEnvelope(trimmed) {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	if !strings.Contains(lower, "to=functions.") {
+		return false
+	}
+	return strings.HasPrefix(trimmed, "{") ||
+		strings.HasPrefix(trimmed, "[") ||
+		strings.HasPrefix(trimmed, "\"") ||
+		strings.HasPrefix(lower, "to=functions.") ||
+		strings.HasPrefix(lower, "json to=functions.")
+}
+
+func looksLikeJSONToolEnvelope(trimmed string) bool {
+	if !strings.HasPrefix(trimmed, "{") {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	if !strings.Contains(lower, "\"arguments\"") {
+		return false
+	}
+	if !strings.Contains(lower, "\"tool_name\"") &&
+		!strings.Contains(lower, "\"toolname\"") &&
+		!strings.Contains(lower, "\"tool\"") &&
+		!strings.Contains(lower, "\"name\"") {
+		return false
+	}
+
+	candidate := trimmed
+	if idx := strings.LastIndex(candidate, "}"); idx >= 0 {
+		candidate = candidate[:idx+1]
+	}
+
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(candidate), &obj); err != nil {
+		return false
+	}
+	if len(obj) == 0 {
+		return false
+	}
+	if _, ok := obj["arguments"]; !ok {
+		return false
+	}
+
+	for _, key := range []string{"tool_name", "toolname", "tool", "name"} {
+		raw, ok := obj[key]
+		if !ok {
+			continue
+		}
+		var toolName string
+		if err := json.Unmarshal(raw, &toolName); err == nil && strings.TrimSpace(toolName) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // --- 3. Thinking/reasoning tags ---
 
 // Matches TS stripThinkingTagsFromText() with strict mode.
 // Strips: <think>...</think>, <thinking>...</thinking>, <thought>...</thought>,
-//         <antThinking>...</antThinking>
+//
+//	<antThinking>...</antThinking>
+//
 // Go regexp doesn't support backreferences, so we use separate patterns.
 var thinkingTagPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?is)<think>.*?</think>`),
@@ -378,7 +530,7 @@ func StripConfigLeak(content, agentType string) string {
 // IsSilentReply checks if the text is a NO_REPLY token.
 // Matching TS isSilentReplyText() from auto-reply/tokens.ts.
 func IsSilentReply(text string) bool {
-	trimmed := strings.TrimSpace(text)
+	trimmed := normalizeSilentReplyCandidate(text)
 	if trimmed == "" {
 		return false
 	}
@@ -402,6 +554,45 @@ func IsSilentReply(text string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeSilentReplyCandidate(text string) string {
+	trimmed := strings.TrimSpace(text)
+	for {
+		inner, ok := unwrapSilentReplyWrapper(trimmed)
+		if !ok {
+			return trimmed
+		}
+		trimmed = strings.TrimSpace(inner)
+	}
+}
+
+func unwrapSilentReplyWrapper(text string) (string, bool) {
+	if len(text) < 2 {
+		return "", false
+	}
+	pairs := [][2]string{
+		{"(", ")"},
+		{"[", "]"},
+		{"{", "}"},
+		{"<", ">"},
+		{"\"", "\""},
+		{"'", "'"},
+		{"`", "`"},
+		{"*", "*"},
+		{"_", "_"},
+		{"~", "~"},
+	}
+	for _, pair := range pairs {
+		if strings.HasPrefix(text, pair[0]) && strings.HasSuffix(text, pair[1]) {
+			inner := text[len(pair[0]) : len(text)-len(pair[1])]
+			if strings.TrimSpace(inner) == "" {
+				return "", false
+			}
+			return inner, true
+		}
+	}
+	return "", false
 }
 
 func isWordChar(r rune) bool {

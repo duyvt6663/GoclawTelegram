@@ -7,7 +7,7 @@ description: |
   "experimental feature", "feature flag", "isolated feature".
 metadata:
   author: GoClaw
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Beta Feature Builder
@@ -111,6 +111,39 @@ The `beta.Deps` struct passed to `Init()`:
 | `MessageBus` | `*bus.MessageBus` | Subscribe/publish events |
 | `Workspace` | `string` | Workspace directory path |
 | `DataDir` | `string` | Data directory path |
+
+## Telegram Runtime Safety Rules
+
+When a beta feature registers Telegram runtime handlers, treat them as **process-global** by default.
+
+- `telegramchannel.RegisterDynamicCommand(...)` is visible to every Telegram bot in the gateway unless the handler implements `EnabledForChannel(channel *telegramchannel.Channel) bool`.
+- `telegramchannel.RegisterDynamicUploadHandler(...)` is visible to every Telegram bot in the gateway unless the handler implements `EnabledForChannel(channel *telegramchannel.Channel) bool`.
+- Do **not** assume “the current bot” is implicit. A globally registered handler will fire on every matching bot unless you gate it explicitly.
+
+Required rule for new Telegram features:
+
+1. If the feature registers a dynamic command, upload handler, or similar Telegram runtime hook, implement channel scoping.
+2. Gate that scoping using the owning agent’s `tools_config` allowlist and/or topic routing, following existing patterns such as `internal/beta/lop_pho/feature.go`.
+3. Add a regression test that proves the intended bot is enabled and unrelated bots are disabled.
+
+Do not ship Telegram features that:
+
+- register runtime handlers globally with no channel gate
+- auto-create per-channel state from an unscoped handler
+- assume a command/upload should be handled by every Telegram bot in the process
+
+## Writable Storage Rules
+
+Do not assume `deps.DataDir` is writable in every runtime. Beta features that cache files locally must resolve a writable storage root.
+
+Required rule for new file-caching features:
+
+1. Probe the configured `DataDir` before relying on it for writes.
+2. If it is not writable, fall back to a workspace-local cache such as `filepath.Join(deps.Workspace, "beta_cache", <feature_name>)`.
+3. If workspace-local storage is unavailable, fall back to a temp directory under `/tmp`.
+4. Add a regression test that proves the feature falls back cleanly when the configured data dir is not writable.
+
+Prefer feature-local cache roots over writing directly into shared global paths. Keep cached files under the feature’s own subtree.
 
 ## Adding Agent Tools
 
@@ -234,3 +267,9 @@ go build ./...                      # PG build
 go build -tags sqliteonly ./...     # SQLite build
 go vet ./...                        # Static analysis
 ```
+
+For Telegram features, also verify:
+
+- only the intended bot(s) expose the dynamic command/upload handler
+- unrelated Telegram bots stay silent for the same trigger
+- any cached files can actually be written in the target runtime

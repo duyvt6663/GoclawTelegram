@@ -41,6 +41,7 @@ const (
 	triggerKindDynamic       = "dynamic"
 	sourceRemoteOK           = "remoteok"
 	sourceWeWorkRemotely     = "weworkremotely"
+	sourceLinkedInProxy      = "linkedin_proxy"
 	sourceCacheTTL           = 10 * time.Minute
 )
 
@@ -342,6 +343,70 @@ func supportedSourceList() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func effectiveSourceIDs(cfg *JobCrawlerConfig) []string {
+	if cfg == nil {
+		return append([]string(nil), defaultSources...)
+	}
+	out := normalizeSources(cfg.Sources)
+	if cfg.EnableLinkedInProxySource {
+		seen := false
+		for _, sourceID := range out {
+			if sourceID == sourceLinkedInProxy {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out = append(out, sourceLinkedInProxy)
+		}
+	}
+	if len(out) == 0 {
+		return append([]string(nil), defaultSources...)
+	}
+	return out
+}
+
+func buildLinkedInProxyIntent(cfg *JobCrawlerConfig) string {
+	if cfg == nil {
+		return "AI engineer machine learning engineer remote"
+	}
+
+	parts := []string{"AI engineer", "machine learning engineer"}
+	switch cfg.LocationMode {
+	case locationModeVietnam:
+		parts = append(parts, "Vietnam")
+	default:
+		if cfg.RemoteOnly || cfg.LocationMode == locationModeRemoteGlobal || cfg.LocationMode == locationModeHybrid {
+			parts = append(parts, "remote")
+		}
+	}
+	for _, keyword := range cfg.KeywordsInclude {
+		if cleanText(keyword) == "" {
+			continue
+		}
+		parts = append(parts, keyword)
+		if len(parts) >= 6 {
+			break
+		}
+	}
+	return cleanText(strings.Join(parts, " "))
+}
+
+func resolveLinkedInProxyMaxResults(cfg *JobCrawlerConfig) int {
+	base := defaultMaxResults * 4
+	if cfg != nil && cfg.MaxResults > 0 {
+		base = cfg.MaxResults * 4
+	}
+	switch {
+	case base < 18:
+		return 18
+	case base > 32:
+		return 32
+	default:
+		return base
+	}
 }
 
 func parseRFC3339(value string) *time.Time {

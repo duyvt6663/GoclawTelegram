@@ -144,28 +144,30 @@ func (f *JobCrawlerFeature) handleRunDynamicMethod(ctx context.Context, client *
 }
 
 type upsertConfigParams struct {
-	Key               string   `json:"key"`
-	Name              string   `json:"name"`
-	Channel           string   `json:"channel"`
-	ChatID            string   `json:"chat_id"`
-	ThreadID          *int     `json:"thread_id,omitempty"`
-	Timezone          string   `json:"timezone"`
-	KeywordsInclude   []string `json:"keywords_include"`
-	KeywordsExclude   []string `json:"keywords_exclude"`
-	AllowedRoles      []string `json:"allowed_roles"`
-	MaxSeniorityLevel string   `json:"max_seniority_level"`
-	RemoteOnly        *bool    `json:"remote_only,omitempty"`
-	LocationMode      string   `json:"location_mode"`
-	RemotePriority    float64  `json:"remote_priority"`
-	VietnamPriority   float64  `json:"vietnam_priority"`
-	Sources           []string `json:"sources"`
-	PostTime          string   `json:"post_time"`
-	MaxResults        int      `json:"max_results"`
-	DedupeWindowDays  int      `json:"dedupe_window_days"`
-	IncludeAISummary  *bool    `json:"include_ai_summary,omitempty"`
-	EnableLLMRerank   *bool    `json:"enable_llm_rerank,omitempty"`
-	LLMRerankTopN     int      `json:"llm_rerank_top_n"`
-	Enabled           *bool    `json:"enabled,omitempty"`
+	Key                       string   `json:"key"`
+	Name                      string   `json:"name"`
+	Channel                   string   `json:"channel"`
+	ChatID                    string   `json:"chat_id"`
+	ThreadID                  *int     `json:"thread_id,omitempty"`
+	Timezone                  string   `json:"timezone"`
+	KeywordsInclude           []string `json:"keywords_include"`
+	KeywordsExclude           []string `json:"keywords_exclude"`
+	AllowedRoles              []string `json:"allowed_roles"`
+	MaxSeniorityLevel         string   `json:"max_seniority_level"`
+	RemoteOnly                *bool    `json:"remote_only,omitempty"`
+	LocationMode              string   `json:"location_mode"`
+	RemotePriority            float64  `json:"remote_priority"`
+	VietnamPriority           float64  `json:"vietnam_priority"`
+	Sources                   []string `json:"sources"`
+	PostTime                  string   `json:"post_time"`
+	MaxResults                int      `json:"max_results"`
+	DedupeWindowDays          int      `json:"dedupe_window_days"`
+	IncludeAISummary          *bool    `json:"include_ai_summary,omitempty"`
+	EnableLinkedInProxySource *bool    `json:"enable_linkedin_proxy_source,omitempty"`
+	HardTitleFilter           *bool    `json:"hard_title_filter,omitempty"`
+	EnableLLMRerank           *bool    `json:"enable_llm_rerank,omitempty"`
+	LLMRerankTopN             int      `json:"llm_rerank_top_n"`
+	Enabled                   *bool    `json:"enabled,omitempty"`
 }
 
 func (p upsertConfigParams) toConfig() JobCrawlerConfig {
@@ -197,6 +199,12 @@ func (p upsertConfigParams) toConfig() JobCrawlerConfig {
 	}
 	if p.IncludeAISummary != nil {
 		cfg.IncludeAISummary = *p.IncludeAISummary
+	}
+	if p.EnableLinkedInProxySource != nil {
+		cfg.EnableLinkedInProxySource = *p.EnableLinkedInProxySource
+	}
+	if p.HardTitleFilter != nil {
+		cfg.HardTitleFilter = *p.HardTitleFilter
 	}
 	if p.EnableLLMRerank != nil {
 		cfg.EnableLLMRerank = *p.EnableLLMRerank

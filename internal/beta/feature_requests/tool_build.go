@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -335,7 +337,8 @@ func (t *buildFeatureTool) runCodexPrompt(ctx context.Context, workspace, prompt
 func codexBuildArgs(prompt string) []string {
 	return []string{
 		"exec",
-		"--full-auto",
+		"--sandbox",
+		"danger-full-access",
 		"--skip-git-repo-check",
 		prompt,
 	}
@@ -508,6 +511,8 @@ func summarizeBuildFailure(output string, runErr error) string {
 				strings.Contains(lower, "/pkg/mod/cache") ||
 				strings.Contains(lower, "gocache") ||
 				strings.Contains(lower, "gomodcache")):
+			important = append(important, line)
+		case strings.Contains(lower, "sandbox-exec: sandbox_apply"):
 			important = append(important, line)
 		case strings.Contains(lower, "error:"),
 			strings.Contains(lower, "failed"),
@@ -1130,7 +1135,119 @@ func buildProcessEnv() ([]string, error) {
 		}
 		env = setEnvValue(env, path.key, path.dir)
 	}
+	codexHome, err := prepareBuildCodexHome(cacheRoot)
+	if err != nil {
+		return nil, fmt.Errorf("prepare CODEX_HOME: %w", err)
+	}
+	if codexHome != "" {
+		env = setEnvValue(env, "CODEX_HOME", codexHome)
+	}
 	return env, nil
+}
+
+func prepareBuildCodexHome(cacheRoot string) (string, error) {
+	target := filepath.Join(cacheRoot, "codex-home")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		return "", err
+	}
+	for _, dir := range []string{"sessions", "memories", "log", "tmp"} {
+		if err := os.MkdirAll(filepath.Join(target, dir), 0o755); err != nil {
+			return "", err
+		}
+	}
+
+	source := resolveSourceCodexHome(target)
+	if source == "" {
+		return target, nil
+	}
+
+	for _, name := range []string{"auth.json", "config.toml", "config.toml.backup", "hooks.json", "installation_id", "version.json"} {
+		if err := copyCodexPath(filepath.Join(source, name), filepath.Join(target, name)); err != nil {
+			return "", err
+		}
+	}
+	if err := copyCodexPath(filepath.Join(source, "rules"), filepath.Join(target, "rules")); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+func resolveSourceCodexHome(target string) string {
+	if current := strings.TrimSpace(os.Getenv("CODEX_HOME")); current != "" {
+		clean := filepath.Clean(current)
+		if clean != filepath.Clean(target) {
+			return clean
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, ".codex")
+}
+
+func copyCodexPath(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.IsDir() {
+		return copyCodexDir(src, dst)
+	}
+	return copyCodexFile(src, dst, info.Mode())
+}
+
+func copyCodexDir(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		targetPath := dst
+		if rel != "." {
+			targetPath = filepath.Join(dst, rel)
+		}
+		if d.IsDir() {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			return os.MkdirAll(targetPath, info.Mode().Perm())
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return copyCodexFile(path, targetPath, info.Mode())
+	})
+}
+
+func copyCodexFile(src, dst string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Close()
 }
 
 func setEnvValue(env []string, key, value string) []string {
@@ -1165,10 +1282,12 @@ func buildCodexPrompt(req *FeatureRequest) string {
 4. Register the feature in internal/beta/all/all.go
 5. If shared/common GoClaw code or builder infrastructure blocks the feature, fix that too
 6. You are explicitly allowed to change common/shared code when required to unblock this feature; no extra approval is needed
-7. Run go build ./... and go vet ./... to verify compilation
-8. Keep iterating until build + vet pass inside this run; do not stop at analysis
-9. Write a brief plan summary as a comment in feature.go
-10. End your final response with exactly one single-line manifest in this format:
+7. If you register Telegram dynamic commands, upload handlers, or similar runtime hooks, you must channel-scope them with EnabledForChannel(...) so unrelated bots do not react. Gate them via the owning agent's tools_config allowlist and/or topic routing; never rely on process-global registration alone
+8. If the feature stores local files, do not assume DataDir is writable. Probe it first and fall back to a feature-local cache under the workspace, then /tmp if needed
+9. Run go build ./... and go vet ./... to verify compilation
+10. Keep iterating until build + vet pass inside this run; do not stop at analysis
+11. Write a brief plan summary as a comment in feature.go
+12. End your final response with exactly one single-line manifest in this format:
 BUILD_ARTIFACTS: {"feature_root":"internal/beta/<feature_folder>","files":["internal/beta/<feature_folder>/feature.go","internal/beta/all/all.go"]}
 Only list repo-relative paths that actually exist after your changes.
 
@@ -1198,10 +1317,12 @@ func buildRepairPrompt(req *FeatureRequest, output, summary string, attempt, att
 ## Repair Rules:
 1. Fix the failure that blocked the previous attempt.
 2. You are explicitly allowed to modify shared/common GoClaw code, tooling, and beta infrastructure when that is what blocks the feature.
-3. Re-run go build ./... and go vet ./... inside this run.
-4. If the next failure reveals another shared-code blocker, fix that too instead of stopping.
-5. Do not ask for approval. Do not stop at analysis. Leave the repo in a state where this feature builds cleanly if possible.
-6. End your final response with exactly one single-line manifest in this format:
+3. If the feature uses Telegram dynamic handlers, make sure they are channel-scoped with EnabledForChannel(...) so only the intended bot(s) react.
+4. If the feature writes local cached files, make sure the write path is actually writable and falls back away from an unwritable DataDir.
+5. Re-run go build ./... and go vet ./... inside this run.
+6. If the next failure reveals another shared-code blocker, fix that too instead of stopping.
+7. Do not ask for approval. Do not stop at analysis. Leave the repo in a state where this feature builds cleanly if possible.
+8. End your final response with exactly one single-line manifest in this format:
 BUILD_ARTIFACTS: {"feature_root":"internal/beta/<feature_folder>","files":["internal/beta/<feature_folder>/feature.go","internal/beta/all/all.go"]}
 Only list repo-relative paths that actually exist after your changes.
 

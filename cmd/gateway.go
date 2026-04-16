@@ -1205,6 +1205,7 @@ func runGateway() {
 	betaDeps := beta.Deps{
 		Config:         cfg,
 		Stores:         pgStores,
+		AgentRouter:    agentRouter,
 		ToolRegistry:   toolsReg,
 		MethodRouter:   server.Router(),
 		Server:         server,

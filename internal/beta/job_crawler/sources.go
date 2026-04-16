@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/net/html"
 
+	linkedinjobsproxy "github.com/nextlevelbuilder/goclaw/internal/beta/linkedin_jobs_proxy"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 )
 
@@ -87,16 +88,22 @@ var sourceSpecs = map[string]sourceSpec{
 		ListingURL: "https://weworkremotely.com/remote-full-time-jobs",
 		FeedURL:    "https://weworkremotely.com/remote-jobs.rss",
 	},
+	sourceLinkedInProxy: {
+		ID:    sourceLinkedInProxy,
+		Label: "LinkedIn (Search Proxy)",
+	},
 }
 
-func (f *JobCrawlerFeature) fetchJobsForSource(ctx context.Context, sourceID string) ([]JobListing, error) {
+func (f *JobCrawlerFeature) fetchJobsForSource(ctx context.Context, cfg *JobCrawlerConfig, sourceID string) ([]JobListing, error) {
 	spec, ok := sourceSpecs[strings.TrimSpace(strings.ToLower(sourceID))]
 	if !ok {
 		return nil, fmt.Errorf("unsupported source %q", sourceID)
 	}
 
-	if jobs, ok := f.cachedJobs(spec.ID); ok {
-		return jobs, nil
+	if spec.ID != sourceLinkedInProxy {
+		if jobs, ok := f.cachedJobs(spec.ID); ok {
+			return jobs, nil
+		}
 	}
 
 	retryCfg := providers.DefaultRetryConfig()
@@ -110,6 +117,8 @@ func (f *JobCrawlerFeature) fetchJobsForSource(ctx context.Context, sourceID str
 			return f.fetchRemoteOKJobs(ctx, spec)
 		case sourceWeWorkRemotely:
 			return f.fetchWeWorkRemotelyJobs(ctx, spec)
+		case sourceLinkedInProxy:
+			return f.fetchLinkedInProxyJobs(ctx, cfg, spec)
 		default:
 			return nil, fmt.Errorf("unsupported source %q", spec.ID)
 		}
@@ -117,8 +126,63 @@ func (f *JobCrawlerFeature) fetchJobsForSource(ctx context.Context, sourceID str
 	if err != nil {
 		return nil, err
 	}
-	f.storeCachedJobs(spec.ID, jobs)
+	if spec.ID != sourceLinkedInProxy {
+		f.storeCachedJobs(spec.ID, jobs)
+	}
 	return jobs, nil
+}
+
+func (f *JobCrawlerFeature) fetchLinkedInProxyJobs(ctx context.Context, cfg *JobCrawlerConfig, spec sourceSpec) ([]JobListing, error) {
+	if f == nil || f.linkedinProxy == nil {
+		return nil, fmt.Errorf("linkedin jobs proxy is unavailable")
+	}
+	if cfg == nil {
+		return nil, fmt.Errorf("job crawler config is required")
+	}
+
+	payload, err := f.linkedinProxy.Search(ctx, cfg.TenantID, linkedinjobsproxy.SearchRequest{
+		Query:           buildLinkedInProxyIntent(cfg),
+		MaxResults:      resolveLinkedInProxyMaxResults(cfg),
+		TopNPerQuery:    8,
+		HardTitleFilter: cfg.HardTitleFilter,
+		RemoteOnly:      cfg.RemoteOnly || cfg.LocationMode == locationModeRemoteGlobal || cfg.LocationMode == locationModeHybrid,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if payload == nil || len(payload.Jobs) == 0 {
+		return nil, nil
+	}
+
+	out := make([]JobListing, 0, len(payload.Jobs))
+	for _, preview := range payload.Jobs {
+		title := cleanText(preview.Title)
+		company := cleanText(preview.Company)
+		rawURL := canonicalizeURL(preview.URL)
+		if title == "" || company == "" || rawURL == "" {
+			continue
+		}
+
+		tags := []string{"linkedin"}
+		if preview.RoleType != "" {
+			tags = append(tags, strings.ReplaceAll(preview.RoleType, "_", " "))
+		}
+		location := cleanText(preview.Location)
+		description := trimText(cleanText(strings.Join([]string{preview.Snippet, preview.Description}, " ")), 2400)
+		out = append(out, JobListing{
+			Source:       spec.ID,
+			SourceLabel:  spec.Label,
+			Title:        title,
+			Company:      company,
+			Location:     location,
+			Tags:         normalizeStringSlice(tags),
+			URL:          rawURL,
+			PostedAt:     preview.PostedAt,
+			Description:  description,
+			AssumeRemote: strings.Contains(strings.ToLower(location+" "+preview.Snippet), "remote"),
+		})
+	}
+	return out, nil
 }
 
 func (f *JobCrawlerFeature) cachedJobs(sourceID string) ([]JobListing, bool) {

@@ -307,7 +307,7 @@ func TestFeaturePollTool_NonLopTruongCreatesPoll(t *testing.T) {
 
 func TestCodexBuildArgsUsesNonInteractiveFullAutoExec(t *testing.T) {
 	got := codexBuildArgs("build this feature")
-	want := []string{"exec", "--full-auto", "--skip-git-repo-check", "build this feature"}
+	want := []string{"exec", "--sandbox", "danger-full-access", "--skip-git-repo-check", "build this feature"}
 	if len(got) != len(want) {
 		t.Fatalf("len(codexBuildArgs()) = %d, want %d", len(got), len(want))
 	}
@@ -349,6 +349,57 @@ func TestBuildProcessEnvUsesWritableTempCaches(t *testing.T) {
 		}
 		if !info.IsDir() {
 			t.Fatalf("%s path %q is not a directory", key, value)
+		}
+	}
+}
+
+func TestBuildProcessEnvSeedsWritableCodexHome(t *testing.T) {
+	fakeHome := t.TempDir()
+	sourceCodex := filepath.Join(fakeHome, ".codex")
+	if err := os.MkdirAll(filepath.Join(sourceCodex, "rules"), 0o755); err != nil {
+		t.Fatalf("mkdir source codex rules: %v", err)
+	}
+	files := map[string]string{
+		filepath.Join(sourceCodex, "auth.json"):      `{"token":"secret"}`,
+		filepath.Join(sourceCodex, "config.toml"):    "model = \"gpt-5.4\"\n",
+		filepath.Join(sourceCodex, "hooks.json"):     "{}\n",
+		filepath.Join(sourceCodex, "installation_id"): "install-1\n",
+		filepath.Join(sourceCodex, "version.json"):   "{\"version\":\"0.120.0\"}\n",
+		filepath.Join(sourceCodex, "rules", "default.rules"): "allow = true\n",
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("CODEX_HOME", "")
+
+	env, err := buildProcessEnv()
+	if err != nil {
+		t.Fatalf("buildProcessEnv() error = %v", err)
+	}
+
+	codexHome := testEnvValue(env, "CODEX_HOME")
+	if codexHome == "" {
+		t.Fatal("CODEX_HOME missing from build env")
+	}
+	tempRoot := filepath.Join(os.TempDir(), "goclaw-feature-build")
+	if !strings.HasPrefix(codexHome, tempRoot) {
+		t.Fatalf("CODEX_HOME = %q, want path under %q", codexHome, tempRoot)
+	}
+	for _, rel := range []string{
+		"auth.json",
+		"config.toml",
+		"hooks.json",
+		"installation_id",
+		"version.json",
+		filepath.Join("rules", "default.rules"),
+		filepath.Join("sessions"),
+	} {
+		if _, err := os.Stat(filepath.Join(codexHome, rel)); err != nil {
+			t.Fatalf("expected %s in seeded CODEX_HOME: %v", rel, err)
 		}
 	}
 }
@@ -569,6 +620,22 @@ func TestSummarizeBuildFailureKeepsRepoTrustError(t *testing.T) {
 	got := summarizeBuildFailure(output, fmt.Errorf("exit status 1"))
 	if !strings.Contains(got, "Not inside a trusted directory") {
 		t.Fatalf("summarizeBuildFailure() = %q, want repo trust failure", got)
+	}
+	if !strings.Contains(got, "Build failed: exit status 1") {
+		t.Fatalf("summarizeBuildFailure() = %q, want terminal failure line", got)
+	}
+}
+
+func TestSummarizeBuildFailureKeepsSandboxApplyError(t *testing.T) {
+	output := strings.Join([]string{
+		"STDERR:",
+		"sandbox-exec: sandbox_apply: Operation not permitted",
+		"Build failed: exit status 1",
+	}, "\n")
+
+	got := summarizeBuildFailure(output, fmt.Errorf("exit status 1"))
+	if !strings.Contains(got, "sandbox-exec: sandbox_apply: Operation not permitted") {
+		t.Fatalf("summarizeBuildFailure() = %q, want sandbox failure", got)
 	}
 	if !strings.Contains(got, "Build failed: exit status 1") {
 		t.Fatalf("summarizeBuildFailure() = %q, want terminal failure line", got)

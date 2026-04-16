@@ -396,8 +396,12 @@ func (p *OpenAIProvider) buildRequestBody(model string, req ChatRequest, stream 
 		}
 	}
 
+	// Native OpenAI chat/completions rejects reasoning_effort for gpt-5.4 tool calls.
+	// Route those through provider-default reasoning instead of failing the whole request.
+	omitReasoning := shouldOmitOpenAIReasoningEffort(model, p.providerType, p.apiBase, p.chatPath, len(req.Tools) > 0)
+
 	// Inject reasoning_effort for models that support/expect OpenAI-style reasoning controls.
-	if level, ok := req.Options[OptThinkingLevel].(string); ok && level != "" && level != "off" {
+	if level, ok := req.Options[OptThinkingLevel].(string); ok && level != "" && level != "off" && !omitReasoning {
 		body[OptReasoningEffort] = normalizeOpenAIReasoningEffort(model, level)
 	}
 
@@ -433,6 +437,26 @@ func normalizeOpenAIReasoningEffort(model, level string) string {
 	}
 
 	return level
+}
+
+func shouldOmitOpenAIReasoningEffort(model, providerType, apiBase, chatPath string, hasTools bool) bool {
+	if !hasTools {
+		return false
+	}
+	if strings.TrimSpace(providerType) != "openai_compat" {
+		return false
+	}
+	if strings.TrimSpace(chatPath) != "" && strings.TrimSpace(chatPath) != "/chat/completions" {
+		return false
+	}
+	base := strings.ToLower(strings.TrimSpace(apiBase))
+	if base == "" {
+		base = "https://api.openai.com/v1"
+	}
+	if !strings.Contains(base, "api.openai.com") {
+		return false
+	}
+	return strings.HasPrefix(openAIBaseModel(model), "gpt-5.4")
 }
 
 func openAIBaseModel(model string) string {

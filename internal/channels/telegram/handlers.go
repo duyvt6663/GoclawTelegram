@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
 
@@ -336,6 +337,14 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		return
 	}
 
+	uploadMatchCtx := ctx
+	if tenantID := c.TenantID(); tenantID != uuid.Nil {
+		uploadMatchCtx = store.WithTenantID(uploadMatchCtx, tenantID)
+	} else {
+		uploadMatchCtx = store.WithTenantID(uploadMatchCtx, store.MasterTenantID)
+	}
+	uploadHandler := matchingDynamicUploadHandler(uploadMatchCtx, c, message)
+
 	// Enrich content with forward/reply/location context
 	msgCtx := buildMessageContext(message, c.bot.Username())
 	content = enrichContentWithContext(content, msgCtx)
@@ -356,6 +365,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	//            — enables "shared group" where all bots listen, but yield when someone is called by name
 	mentionMode := topicCfg.effectiveMentionMode(c.mentionMode)
 	implicitReactionMedia := false
+	implicitUploadHandling := uploadHandler != nil
 	if isGroup && (topicCfg.effectiveRequireMention(c.requireMention) || mentionMode == "yield") {
 		botUsername := c.bot.Username()
 
@@ -408,6 +418,9 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 			wasMentioned = true
 			implicitReactionMedia = true
 		}
+		if !wasMentioned && !otherMentioned && implicitUploadHandling {
+			wasMentioned = true
+		}
 
 		// Yield mode: skip only if another bot/user is explicitly mentioned (not us).
 		// If nobody is mentioned → respond. If we are mentioned → respond.
@@ -424,6 +437,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 			"require_mention", c.requireMention,
 			"mention_mode", mentionMode,
 			"reaction_media_bypass", implicitReactionMedia,
+			"upload_bypass", implicitUploadHandling,
 			"was_mentioned", wasMentioned,
 			"text_preview", channels.Truncate(content, 60),
 		)
@@ -476,6 +490,34 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		}
 	}
 
+	uploadSend := func(sendCtx context.Context, outbound bus.OutboundMessage) error {
+		if strings.TrimSpace(outbound.Channel) == "" {
+			outbound.Channel = c.Name()
+		}
+		if strings.TrimSpace(outbound.ChatID) == "" {
+			outbound.ChatID = chatIDStr
+		}
+		if outbound.Metadata == nil {
+			outbound.Metadata = make(map[string]string)
+		}
+		if localKey != "" && localKey != chatIDStr && outbound.Metadata["local_key"] == "" {
+			outbound.Metadata["local_key"] = localKey
+		}
+		if outbound.Metadata["reply_to_message_id"] == "" && message.MessageID > 0 {
+			outbound.Metadata["reply_to_message_id"] = fmt.Sprintf("%d", message.MessageID)
+		}
+		if outbound.Metadata["message_thread_id"] == "" && messageThreadID > 0 {
+			outbound.Metadata["message_thread_id"] = fmt.Sprintf("%d", messageThreadID)
+		}
+		return c.Send(sendCtx, outbound)
+	}
+	uploadReply := func(replyCtx context.Context, text string) error {
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
+		return uploadSend(replyCtx, bus.OutboundMessage{Content: text})
+	}
+
 	// --- Group pairing gate (only reached when bot is mentioned) ---
 	if isGroup && topicCfg.groupPolicy == "pairing" && c.pairingService != nil {
 		if _, cached := c.approvedGroups.Load(chatIDStr); !cached {
@@ -492,6 +534,24 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 				c.sendGroupPairingReply(ctx, chatID, chatIDStr, groupSenderID, localKey, messageThreadID, message.Chat.Title)
 				return
 			}
+		}
+	}
+
+	if uploadHandler != nil {
+		if uploadHandler.HandleUpload(uploadMatchCtx, c, DynamicUploadContext{
+			Message:         message,
+			ChatID:          chatID,
+			ChatIDStr:       chatIDStr,
+			LocalKey:        localKey,
+			SenderID:        senderID,
+			UserID:          userID,
+			IsGroup:         isGroup,
+			IsForum:         isForum,
+			MessageThreadID: messageThreadID,
+			Send:            uploadSend,
+			Reply:           uploadReply,
+		}) {
+			return
 		}
 	}
 

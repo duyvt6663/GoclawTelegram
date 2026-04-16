@@ -464,6 +464,33 @@ func (l *Loop) runLoop(ctx context.Context, req RunRequest) (result *RunResult, 
 		// Reset truncation counter on successful tool call (model recovered).
 		rs.truncationRetries = 0
 
+		downgradedToolText := len(resp.ToolCalls) == 0 && looksLikeDowngradedToolCallText(resp.Content)
+		if downgradedToolText {
+			rs.downgradedToolRetries++
+			slog.Warn("downgraded plain-text tool call detected",
+				"agent", l.id,
+				"iteration", rs.iteration,
+				"retry", rs.downgradedToolRetries,
+			)
+
+			if rs.downgradedToolRetries >= maxDowngradedToolRetries {
+				slog.Warn("downgraded tool retry limit reached, giving up",
+					"agent", l.id,
+					"retries", rs.downgradedToolRetries,
+				)
+				rs.finalContent = "[Unable to complete: the model emitted a tool invocation as plain text instead of calling the tool. Please retry.]"
+				break
+			}
+
+			hint := "[System] You tried to emit a tool invocation as plain text (for example `to=functions.some_tool`). Do NOT print JSON arguments, `to=functions...`, or any tool syntax in the reply. Use a real structured tool call now."
+			messages = append(messages,
+				providers.Message{Role: "assistant", Content: "[Plain-text tool invocation rejected]"},
+				providers.Message{Role: "user", Content: hint},
+			)
+			continue
+		}
+		rs.downgradedToolRetries = 0
+
 		// No tool calls — exit or drain injected follow-ups.
 		if len(resp.ToolCalls) == 0 {
 			// Mid-run injection (Point B): drain all buffered user follow-up messages
@@ -788,6 +815,10 @@ func (l *Loop) resolveToolCallName(name string) string {
 // maxTruncationRetries caps consecutive truncation/parse-error retries.
 // After this many retries the loop gives up rather than burning all iterations.
 const maxTruncationRetries = 3
+
+// maxDowngradedToolRetries caps consecutive retries when a model emits
+// plain-text pseudo tool syntax instead of structured tool calls.
+const maxDowngradedToolRetries = 2
 
 // hasParseErrors returns true if any tool call has a non-empty ParseError,
 // indicating the arguments JSON was malformed or truncated by the provider.

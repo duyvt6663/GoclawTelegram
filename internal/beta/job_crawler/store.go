@@ -15,32 +15,34 @@ var (
 )
 
 type JobCrawlerConfig struct {
-	ID                string    `json:"id"`
-	TenantID          string    `json:"tenant_id,omitempty"`
-	Key               string    `json:"key"`
-	Name              string    `json:"name"`
-	Channel           string    `json:"channel"`
-	ChatID            string    `json:"chat_id"`
-	ThreadID          int       `json:"thread_id"`
-	Timezone          string    `json:"timezone"`
-	KeywordsInclude   []string  `json:"keywords_include,omitempty"`
-	KeywordsExclude   []string  `json:"keywords_exclude,omitempty"`
-	AllowedRoles      []string  `json:"allowed_roles,omitempty"`
-	MaxSeniorityLevel string    `json:"max_seniority_level,omitempty"`
-	RemoteOnly        bool      `json:"remote_only"`
-	LocationMode      string    `json:"location_mode"`
-	RemotePriority    float64   `json:"remote_priority"`
-	VietnamPriority   float64   `json:"vietnam_priority"`
-	Sources           []string  `json:"sources,omitempty"`
-	PostTime          string    `json:"post_time"`
-	MaxResults        int       `json:"max_results"`
-	DedupeWindowDays  int       `json:"dedupe_window_days"`
-	IncludeAISummary  bool      `json:"include_ai_summary"`
-	EnableLLMRerank   bool      `json:"enable_llm_rerank"`
-	LLMRerankTopN     int       `json:"llm_rerank_top_n"`
-	Enabled           bool      `json:"enabled"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                        string    `json:"id"`
+	TenantID                  string    `json:"tenant_id,omitempty"`
+	Key                       string    `json:"key"`
+	Name                      string    `json:"name"`
+	Channel                   string    `json:"channel"`
+	ChatID                    string    `json:"chat_id"`
+	ThreadID                  int       `json:"thread_id"`
+	Timezone                  string    `json:"timezone"`
+	KeywordsInclude           []string  `json:"keywords_include,omitempty"`
+	KeywordsExclude           []string  `json:"keywords_exclude,omitempty"`
+	AllowedRoles              []string  `json:"allowed_roles,omitempty"`
+	MaxSeniorityLevel         string    `json:"max_seniority_level,omitempty"`
+	RemoteOnly                bool      `json:"remote_only"`
+	LocationMode              string    `json:"location_mode"`
+	RemotePriority            float64   `json:"remote_priority"`
+	VietnamPriority           float64   `json:"vietnam_priority"`
+	Sources                   []string  `json:"sources,omitempty"`
+	PostTime                  string    `json:"post_time"`
+	MaxResults                int       `json:"max_results"`
+	DedupeWindowDays          int       `json:"dedupe_window_days"`
+	IncludeAISummary          bool      `json:"include_ai_summary"`
+	EnableLinkedInProxySource bool      `json:"enable_linkedin_proxy_source"`
+	HardTitleFilter           bool      `json:"hard_title_filter"`
+	EnableLLMRerank           bool      `json:"enable_llm_rerank"`
+	LLMRerankTopN             int       `json:"llm_rerank_top_n"`
+	Enabled                   bool      `json:"enabled"`
+	CreatedAt                 time.Time `json:"created_at"`
+	UpdatedAt                 time.Time `json:"updated_at"`
 }
 
 func (cfg JobCrawlerConfig) withDefaults() JobCrawlerConfig {
@@ -178,6 +180,8 @@ func (s *featureStore) migrate() error {
 			max_results INTEGER NOT NULL DEFAULT ` + fmt.Sprintf("%d", defaultMaxResults) + `,
 			dedupe_window_days INTEGER NOT NULL DEFAULT ` + fmt.Sprintf("%d", defaultDedupeWindowDays) + `,
 			include_ai_summary INTEGER NOT NULL DEFAULT 0,
+			enable_linkedin_proxy_source INTEGER NOT NULL DEFAULT 0,
+			hard_title_filter INTEGER NOT NULL DEFAULT 0,
 			enable_llm_rerank INTEGER NOT NULL DEFAULT 0,
 			llm_rerank_top_n INTEGER NOT NULL DEFAULT ` + fmt.Sprintf("%d", defaultLLMRerankTopN) + `,
 			enabled INTEGER NOT NULL DEFAULT 1,
@@ -255,6 +259,8 @@ func (s *featureStore) migrate() error {
 	for _, stmt := range []string{
 		`ALTER TABLE beta_job_crawler_configs ADD COLUMN allowed_roles TEXT NOT NULL DEFAULT '[]'`,
 		`ALTER TABLE beta_job_crawler_configs ADD COLUMN max_seniority_level TEXT NOT NULL DEFAULT '` + defaultMaxSeniorityLevel + `'`,
+		`ALTER TABLE beta_job_crawler_configs ADD COLUMN enable_linkedin_proxy_source INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE beta_job_crawler_configs ADD COLUMN hard_title_filter INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE beta_job_crawler_configs ADD COLUMN enable_llm_rerank INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE beta_job_crawler_configs ADD COLUMN llm_rerank_top_n INTEGER NOT NULL DEFAULT ` + fmt.Sprintf("%d", defaultLLMRerankTopN),
 		`ALTER TABLE beta_job_crawler_seen_jobs ADD COLUMN normalized_title TEXT NOT NULL DEFAULT ''`,
@@ -291,14 +297,16 @@ func (s *featureStore) upsertConfig(cfg *JobCrawlerConfig) (*JobCrawlerConfig, e
 			    keywords_include=$9, keywords_exclude=$10, allowed_roles=$11, max_seniority_level=$12,
 			    remote_only=$13, location_mode=$14, remote_priority=$15, vietnam_priority=$16,
 			    sources=$17, post_time=$18, max_results=$19, dedupe_window_days=$20,
-			    include_ai_summary=$21, enable_llm_rerank=$22, llm_rerank_top_n=$23, enabled=$24, updated_at=$25
+			    include_ai_summary=$21, enable_linkedin_proxy_source=$22, hard_title_filter=$23,
+			    enable_llm_rerank=$24, llm_rerank_top_n=$25, enabled=$26, updated_at=$27
 			WHERE id=$1 AND tenant_id=$2`,
 			cfgValue.ID, cfgValue.TenantID, cfgValue.Key, cfgValue.Name, cfgValue.Channel, cfgValue.ChatID,
 			cfgValue.ThreadID, cfgValue.Timezone, encodeStringSlice(cfgValue.KeywordsInclude),
 			encodeStringSlice(cfgValue.KeywordsExclude), encodeStringSlice(cfgValue.AllowedRoles), cfgValue.MaxSeniorityLevel,
 			boolToInt(cfgValue.RemoteOnly), cfgValue.LocationMode, cfgValue.RemotePriority, cfgValue.VietnamPriority,
 			encodeStringSlice(cfgValue.Sources), cfgValue.PostTime, cfgValue.MaxResults, cfgValue.DedupeWindowDays,
-			boolToInt(cfgValue.IncludeAISummary), boolToInt(cfgValue.EnableLLMRerank), cfgValue.LLMRerankTopN,
+			boolToInt(cfgValue.IncludeAISummary), boolToInt(cfgValue.EnableLinkedInProxySource), boolToInt(cfgValue.HardTitleFilter),
+			boolToInt(cfgValue.EnableLLMRerank), cfgValue.LLMRerankTopN,
 			boolToInt(cfgValue.Enabled), cfgValue.UpdatedAt,
 		)
 		if err != nil {
@@ -317,14 +325,16 @@ func (s *featureStore) upsertConfig(cfg *JobCrawlerConfig) (*JobCrawlerConfig, e
 				keywords_include, keywords_exclude, allowed_roles, max_seniority_level,
 				remote_only, location_mode, remote_priority, vietnam_priority, sources,
 				post_time, max_results, dedupe_window_days, include_ai_summary,
-				enable_llm_rerank, llm_rerank_top_n, enabled, created_at, updated_at
+				enable_linkedin_proxy_source, hard_title_filter, enable_llm_rerank,
+				llm_rerank_top_n, enabled, created_at, updated_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)`,
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)`,
 			cfgValue.ID, cfgValue.TenantID, cfgValue.Key, cfgValue.Name, cfgValue.Channel, cfgValue.ChatID, cfgValue.ThreadID,
 			cfgValue.Timezone, encodeStringSlice(cfgValue.KeywordsInclude), encodeStringSlice(cfgValue.KeywordsExclude),
 			encodeStringSlice(cfgValue.AllowedRoles), cfgValue.MaxSeniorityLevel, boolToInt(cfgValue.RemoteOnly),
 			cfgValue.LocationMode, cfgValue.RemotePriority, cfgValue.VietnamPriority, encodeStringSlice(cfgValue.Sources),
 			cfgValue.PostTime, cfgValue.MaxResults, cfgValue.DedupeWindowDays, boolToInt(cfgValue.IncludeAISummary),
+			boolToInt(cfgValue.EnableLinkedInProxySource), boolToInt(cfgValue.HardTitleFilter),
 			boolToInt(cfgValue.EnableLLMRerank), cfgValue.LLMRerankTopN, boolToInt(cfgValue.Enabled),
 			cfgValue.CreatedAt, cfgValue.UpdatedAt,
 		)
@@ -342,7 +352,8 @@ func (s *featureStore) getConfigByKey(tenantID, key string) (*JobCrawlerConfig, 
 		SELECT id, tenant_id, config_key, name, channel, chat_id, thread_id, timezone,
 		       keywords_include, keywords_exclude, allowed_roles, max_seniority_level, remote_only, location_mode,
 		       remote_priority, vietnam_priority, sources, post_time, max_results,
-		       dedupe_window_days, include_ai_summary, enable_llm_rerank, llm_rerank_top_n,
+		       dedupe_window_days, include_ai_summary, enable_linkedin_proxy_source, hard_title_filter,
+		       enable_llm_rerank, llm_rerank_top_n,
 		       enabled, created_at, updated_at
 		FROM beta_job_crawler_configs
 		WHERE tenant_id=$1 AND config_key=$2`,
@@ -356,7 +367,8 @@ func (s *featureStore) getConfigByTarget(tenantID, channel, chatID string, threa
 		SELECT id, tenant_id, config_key, name, channel, chat_id, thread_id, timezone,
 		       keywords_include, keywords_exclude, allowed_roles, max_seniority_level, remote_only, location_mode,
 		       remote_priority, vietnam_priority, sources, post_time, max_results,
-		       dedupe_window_days, include_ai_summary, enable_llm_rerank, llm_rerank_top_n,
+		       dedupe_window_days, include_ai_summary, enable_linkedin_proxy_source, hard_title_filter,
+		       enable_llm_rerank, llm_rerank_top_n,
 		       enabled, created_at, updated_at
 		FROM beta_job_crawler_configs
 		WHERE tenant_id=$1 AND channel=$2 AND chat_id=$3 AND thread_id=$4`,
@@ -370,7 +382,8 @@ func (s *featureStore) listConfigs(tenantID string) ([]JobCrawlerConfig, error) 
 		SELECT id, tenant_id, config_key, name, channel, chat_id, thread_id, timezone,
 		       keywords_include, keywords_exclude, allowed_roles, max_seniority_level, remote_only, location_mode,
 		       remote_priority, vietnam_priority, sources, post_time, max_results,
-		       dedupe_window_days, include_ai_summary, enable_llm_rerank, llm_rerank_top_n,
+		       dedupe_window_days, include_ai_summary, enable_linkedin_proxy_source, hard_title_filter,
+		       enable_llm_rerank, llm_rerank_top_n,
 		       enabled, created_at, updated_at
 		FROM beta_job_crawler_configs
 		WHERE tenant_id=$1
@@ -401,7 +414,8 @@ func (s *featureStore) listEnabledConfigs() ([]JobCrawlerConfig, error) {
 		SELECT id, tenant_id, config_key, name, channel, chat_id, thread_id, timezone,
 		       keywords_include, keywords_exclude, allowed_roles, max_seniority_level, remote_only, location_mode,
 		       remote_priority, vietnam_priority, sources, post_time, max_results,
-		       dedupe_window_days, include_ai_summary, enable_llm_rerank, llm_rerank_top_n,
+		       dedupe_window_days, include_ai_summary, enable_linkedin_proxy_source, hard_title_filter,
+		       enable_llm_rerank, llm_rerank_top_n,
 		       enabled, created_at, updated_at
 		FROM beta_job_crawler_configs
 		WHERE enabled=1
@@ -640,12 +654,13 @@ type rowScanner interface {
 func scanJobCrawlerConfig(row rowScanner) (*JobCrawlerConfig, error) {
 	var cfg JobCrawlerConfig
 	var includeJSON, excludeJSON, allowedRolesJSON, sourcesJSON string
-	var remoteOnly, includeAISummary, enableLLMRerank, enabled int
+	var remoteOnly, includeAISummary, enableLinkedInProxySource, hardTitleFilter, enableLLMRerank, enabled int
 	if err := row.Scan(
 		&cfg.ID, &cfg.TenantID, &cfg.Key, &cfg.Name, &cfg.Channel, &cfg.ChatID, &cfg.ThreadID, &cfg.Timezone,
 		&includeJSON, &excludeJSON, &allowedRolesJSON, &cfg.MaxSeniorityLevel, &remoteOnly, &cfg.LocationMode,
 		&cfg.RemotePriority, &cfg.VietnamPriority, &sourcesJSON, &cfg.PostTime, &cfg.MaxResults,
-		&cfg.DedupeWindowDays, &includeAISummary, &enableLLMRerank, &cfg.LLMRerankTopN, &enabled, &cfg.CreatedAt, &cfg.UpdatedAt,
+		&cfg.DedupeWindowDays, &includeAISummary, &enableLinkedInProxySource, &hardTitleFilter,
+		&enableLLMRerank, &cfg.LLMRerankTopN, &enabled, &cfg.CreatedAt, &cfg.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, errCrawlerConfigNotFound
@@ -658,6 +673,8 @@ func scanJobCrawlerConfig(row rowScanner) (*JobCrawlerConfig, error) {
 	cfg.RemoteOnly = intToBool(remoteOnly)
 	cfg.Sources = decodeStringSlice(sourcesJSON)
 	cfg.IncludeAISummary = intToBool(includeAISummary)
+	cfg.EnableLinkedInProxySource = intToBool(enableLinkedInProxySource)
+	cfg.HardTitleFilter = intToBool(hardTitleFilter)
 	cfg.EnableLLMRerank = intToBool(enableLLMRerank)
 	cfg.Enabled = intToBool(enabled)
 	cfg.ThreadID = normalizeThreadID(cfg.ThreadID)

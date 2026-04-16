@@ -118,10 +118,11 @@ func (f *JobCrawlerFeature) upsertConfigForTenant(tenantID string, cfg JobCrawle
 		cfg.MaxSeniorityLevel = normalizeSeniorityLevel(cfg.MaxSeniorityLevel)
 	}
 	cfg.Sources = normalizeSources(cfg.Sources)
-	if len(cfg.Sources) == 0 {
+	sourceIDs := effectiveSourceIDs(&cfg)
+	if len(sourceIDs) == 0 {
 		return nil, fmt.Errorf("sources must include at least one of %s", strings.Join(supportedSourceList(), ", "))
 	}
-	for _, sourceID := range cfg.Sources {
+	for _, sourceID := range sourceIDs {
 		if _, ok := sourceSpecs[sourceID]; !ok {
 			return nil, fmt.Errorf("unsupported source %q", sourceID)
 		}
@@ -313,9 +314,10 @@ func (f *JobCrawlerFeature) runCrawlerRequest(ctx context.Context, cfg *JobCrawl
 	now := time.Now().UTC()
 	allJobs := make([]JobListing, 0, 64)
 	sourceFailures := 0
-	for _, sourceID := range cfg.Sources {
+	sourceIDs := effectiveSourceIDs(cfg)
+	for _, sourceID := range sourceIDs {
 		sourceCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		jobs, err := f.fetchJobsForSource(sourceCtx, sourceID)
+		jobs, err := f.fetchJobsForSource(sourceCtx, cfg, sourceID)
 		cancel()
 		if err != nil {
 			sourceFailures++
@@ -326,7 +328,7 @@ func (f *JobCrawlerFeature) runCrawlerRequest(ctx context.Context, cfg *JobCrawl
 	}
 	run.TotalFetched = len(allJobs)
 	if len(allJobs) == 0 {
-		if sourceFailures == len(cfg.Sources) {
+		if sourceFailures == len(sourceIDs) {
 			return result, fmt.Errorf("all configured sources failed")
 		}
 		run.Status = runStatusNoResults

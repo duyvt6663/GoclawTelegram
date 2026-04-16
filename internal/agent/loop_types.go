@@ -544,4 +544,8 @@ type runState struct {
 	// Truncation retry counter — caps consecutive truncation/parse-error retries
 	// to prevent burning through all iterations when max_tokens is too low.
 	truncationRetries int
+
+	// Downgraded tool retry counter — caps retries when a model emits a plain-text
+	// pseudo tool invocation (for example `to=functions.foo`) instead of a real tool call.
+	downgradedToolRetries int
 }

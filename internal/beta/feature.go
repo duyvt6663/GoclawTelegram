@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/nextlevelbuilder/goclaw/internal/agent"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
@@ -31,6 +32,7 @@ type Feature interface {
 type Deps struct {
 	Config         *config.Config
 	Stores         *store.Stores
+	AgentRouter    *agent.Router
 	ToolRegistry   *tools.Registry
 	MethodRouter   *gateway.MethodRouter
 	Server         *gateway.Server

@@ -16,7 +16,7 @@ var toolGroupsMu sync.RWMutex
 // Tool groups map group names to tool names.
 var toolGroups = map[string][]string{
 	"memory":     {"memory_search", "memory_get"},
-	"web":        {"web_search", "linkup_web_search", "web_fetch"},
+	"web":        {"web_search", "linkup_web_search", "linkedin_jobs_proxy_search", "web_fetch"},
 	"fs":         {"read_file", "write_file", "list_files", "edit"},
 	"runtime":    {"exec"},
 	"sessions":   {"sessions_list", "sessions_history", "sessions_send", "spawn", "session_status"},
@@ -27,7 +27,7 @@ var toolGroups = map[string][]string{
 	// Composite group: all goclaw native tools (excludes MCP/custom plugins).
 	"goclaw": {
 		"read_file", "write_file", "list_files", "edit", "exec",
-		"web_search", "linkup_web_search", "web_fetch", "browser",
+		"web_search", "linkup_web_search", "linkedin_jobs_proxy_search", "web_fetch", "browser",
 		"memory_search", "memory_get",
 		"sessions_list", "sessions_history", "sessions_send", "spawn", "session_status",
 		"cron", "message", "create_forum_topic", "create_so_dau_bai_poll", "create_so_dau_bai_pardon_poll", "list_group_members",

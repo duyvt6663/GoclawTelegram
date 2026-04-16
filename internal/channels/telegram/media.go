@@ -218,6 +218,11 @@ func (c *Channel) mediaMaxBytes() int64 {
 	return maxBytes
 }
 
+// DownloadMediaByFileID downloads a Telegram file into a temporary local path.
+func (c *Channel) DownloadMediaByFileID(ctx context.Context, fileID string, maxBytes int64) (string, error) {
+	return c.downloadMedia(ctx, fileID, maxBytes)
+}
+
 type stickerMediaTarget struct {
 	Type        string
 	FileID      string

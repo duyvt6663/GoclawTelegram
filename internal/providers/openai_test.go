@@ -78,6 +78,48 @@ func TestOpenAIProviderBuildRequestBodyGPT53ChatNormalizesReasoningEffort(t *tes
 	}
 }
 
+func TestOpenAIProviderBuildRequestBodyGPT54ToolsOmitReasoningEffortOnNativeOpenAIChatCompletions(t *testing.T) {
+	p := NewOpenAIProvider("openai", "test-key", "https://api.openai.com/v1", "gpt-5.4")
+	p.WithProviderType("openai_compat")
+
+	req := ChatRequest{
+		Messages: []Message{{Role: "user", Content: "Review this paper"}},
+		Tools: []ToolDefinition{{
+			Type: "function",
+			Function: ToolFunctionSchema{
+				Name:        "research_reviewer_prepare_review",
+				Description: "Prepare a review bundle",
+				Parameters:  map[string]any{"type": "object"},
+			},
+		}},
+		Options: map[string]any{
+			OptThinkingLevel: "xhigh",
+		},
+	}
+
+	body := p.buildRequestBody("gpt-5.4", req, false)
+	if _, ok := body[OptReasoningEffort]; ok {
+		t.Fatalf("reasoning_effort = %v, want omitted for native OpenAI gpt-5.4 tool calls", body[OptReasoningEffort])
+	}
+}
+
+func TestOpenAIProviderBuildRequestBodyGPT54NoToolsKeepsReasoningEffort(t *testing.T) {
+	p := NewOpenAIProvider("openai", "test-key", "https://api.openai.com/v1", "gpt-5.4")
+	p.WithProviderType("openai_compat")
+
+	req := ChatRequest{
+		Messages: []Message{{Role: "user", Content: "Hello"}},
+		Options: map[string]any{
+			OptThinkingLevel: "xhigh",
+		},
+	}
+
+	body := p.buildRequestBody("gpt-5.4", req, false)
+	if got := body[OptReasoningEffort]; got != "xhigh" {
+		t.Fatalf("reasoning_effort = %v, want xhigh", got)
+	}
+}
+
 func TestOpenAIProviderBuildRequestBodyHonorsToolChoiceOverride(t *testing.T) {
 	p := NewOpenAIProvider("openai", "test-key", "https://api.openai.com/v1", "gpt-4o")
 

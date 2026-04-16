@@ -10,9 +10,12 @@ import (
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/daily_iching_query"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/feature_requests"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/job_crawler"
+	_ "github.com/nextlevelbuilder/goclaw/internal/beta/linkedin_jobs_proxy"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/linkup_web_search"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/lop_pho"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/lop_pho_poll_dedupe"
+	_ "github.com/nextlevelbuilder/goclaw/internal/beta/research_reviewer_codex"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/russian_roulette"
+	_ "github.com/nextlevelbuilder/goclaw/internal/beta/telegram_pdf_auto_review"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/topic_tool_routing"
 )

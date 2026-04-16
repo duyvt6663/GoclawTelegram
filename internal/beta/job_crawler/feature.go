@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nextlevelbuilder/goclaw/internal/beta"
+	linkedinjobsproxy "github.com/nextlevelbuilder/goclaw/internal/beta/linkedin_jobs_proxy"
 	"github.com/nextlevelbuilder/goclaw/internal/beta/topicrouting"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	"github.com/nextlevelbuilder/goclaw/internal/config"
@@ -26,11 +27,12 @@ const featureName = "job_crawler"
 // 2. Rank v1.6 with semantic similarity first, then blend keyword, location, role, recency, dynamic boosts, and penalties.
 // 3. Support per-run natural-language overrides plus optional LLM rerank without mutating stored crawler configs.
 type JobCrawlerFeature struct {
-	config     *config.Config
-	stores     *store.Stores
-	store      *featureStore
-	channelMgr *channels.Manager
-	crawl4ai   *crawl4aiClient
+	config        *config.Config
+	stores        *store.Stores
+	store         *featureStore
+	channelMgr    *channels.Manager
+	crawl4ai      *crawl4aiClient
+	linkedinProxy *linkedinjobsproxy.Service
 
 	schedulerCancel context.CancelFunc
 	schedulerDone   chan struct{}
@@ -63,6 +65,7 @@ func (f *JobCrawlerFeature) Init(deps beta.Deps) error {
 	f.sourceCache = make(map[string]cachedSourceResult)
 	f.embeddingLimiter = newAPICallLimiter(embeddingThrottleInterval)
 	f.llmLimiter = newAPICallLimiter(llmThrottleInterval)
+	f.linkedinProxy = linkedinjobsproxy.NewService(deps.Stores.DB)
 	f.crawl4ai = newCrawl4AIClient(
 		os.Getenv("GOCLAW_BETA_JOB_CRAWLER_CRAWL4AI_URL"),
 		os.Getenv("GOCLAW_BETA_JOB_CRAWLER_CRAWL4AI_TOKEN"),
@@ -70,6 +73,11 @@ func (f *JobCrawlerFeature) Init(deps beta.Deps) error {
 
 	if err := f.store.migrate(); err != nil {
 		return fmt.Errorf("%s migration: %w", featureName, err)
+	}
+	if f.linkedinProxy != nil {
+		if err := f.linkedinProxy.Migrate(); err != nil {
+			return fmt.Errorf("%s linkedin proxy migration: %w", featureName, err)
+		}
 	}
 	topicrouting.RegisterTopicFeatureTools(
 		featureName,
