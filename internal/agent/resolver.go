@@ -90,7 +90,8 @@ type ResolverDeps struct {
 	TracingStore store.TracingStore
 
 	// Memory store for extractive memory fallback
-	MemoryStore store.MemoryStore
+	MemoryStore   store.MemoryStore
+	EpisodicStore store.EpisodicStore
 
 	// Tenant store for workspace path resolution
 	TenantStore store.TenantStore
@@ -413,6 +414,7 @@ func NewManagedResolver(deps ResolverDeps) ResolverFunc {
 			BudgetMonthlyCents:     derefInt(ag.BudgetMonthlyCents),
 			TracingStore:           deps.TracingStore,
 			MemoryStore:            deps.MemoryStore,
+			EpisodicStore:          deps.EpisodicStore,
 			MCPStore:               deps.MCPStore,
 			MCPPool:                deps.MCPPool,
 			MCPUserCredSrvs:        mcpUserCredSrvs,

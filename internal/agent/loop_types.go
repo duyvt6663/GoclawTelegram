@@ -95,6 +95,9 @@ type Loop struct {
 	// Per-session summarization lock: prevents concurrent summarize goroutines for the same session.
 	summarizeMu sync.Map // sessionKey → *sync.Mutex
 
+	// Per-source episodic capture lock: prevents duplicate post-run summary generation.
+	episodicMu sync.Map // sourceID → *sync.Mutex
+
 	// Bootstrap/persona context (loaded at startup, injected into system prompt)
 	ownerIDs       []string
 	skillsLoader   *skills.Loader
@@ -179,7 +182,8 @@ type Loop struct {
 	tracingStore       store.TracingStore
 
 	// Memory store for extractive memory fallback (writes directly when LLM flush fails)
-	memStore store.MemoryStore
+	memStore      store.MemoryStore
+	episodicStore store.EpisodicStore
 }
 
 // AgentEvent is emitted during agent execution for WS broadcasting.
@@ -310,7 +314,8 @@ type LoopConfig struct {
 	TracingStore       store.TracingStore
 
 	// Memory store for extractive memory fallback (writes directly when LLM flush fails)
-	MemoryStore store.MemoryStore
+	MemoryStore   store.MemoryStore
+	EpisodicStore store.EpisodicStore
 
 	// Per-user MCP tools (servers requiring per-user credentials)
 	MCPStore        store.MCPServerStore  // for credential lookup
@@ -410,6 +415,7 @@ func NewLoop(cfg LoopConfig) *Loop {
 		budgetMonthlyCents:     cfg.BudgetMonthlyCents,
 		tracingStore:           cfg.TracingStore,
 		memStore:               cfg.MemoryStore,
+		episodicStore:          cfg.EpisodicStore,
 		mcpStore:               cfg.MCPStore,
 		mcpPool:                cfg.MCPPool,
 		mcpUserCredSrvs:        cfg.MCPUserCredSrvs,

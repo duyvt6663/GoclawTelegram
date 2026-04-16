@@ -84,6 +84,7 @@ func setupToolRegistry(
 
 	// Memory tools — PG-backed; always registered (PG memory is always available)
 	toolsReg.Register(tools.NewMemorySearchTool())
+	toolsReg.Register(tools.NewMemoryExpandTool())
 	toolsReg.Register(tools.NewMemoryGetTool())
 	toolsReg.Register(tools.NewKnowledgeGraphSearchTool())
 	slog.Info("memory + knowledge graph tools registered (PG-backed)")
@@ -400,6 +401,11 @@ func setupMemoryEmbeddings(
 						slog.Info("KG embeddings backfill complete", "entities_updated", count)
 					}
 				}()
+			}
+
+			if pgStores.Episodic != nil {
+				pgStores.Episodic.SetEmbeddingProvider(embProvider)
+				slog.Info("episodic embeddings enabled", "provider", embProvider.Name(), "model", embProvider.Model())
 			}
 		} else {
 			slog.Warn("memory embeddings disabled (no API key), chunks stored without vectors")

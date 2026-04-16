@@ -184,6 +184,8 @@ func (l *Loop) finalizeRun(
 
 	l.sessions.Save(ctx, req.SessionKey)
 
+	go l.maybeCreateEpisodicSummary(context.WithoutCancel(ctx), req.SessionKey, rs.totalUsage.TotalTokens)
+
 	// 8. Metadata Stripping: Clean internal [[...]] tags for user-facing content
 	rs.finalContent = StripMessageDirectives(rs.finalContent)
 	if isSilent {

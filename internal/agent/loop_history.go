@@ -131,6 +131,7 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 	_, hasSkillManage := l.tools.Get("skill_manage")
 	_, hasMCPToolSearch := l.tools.Get("mcp_tool_search")
 	_, hasKG := l.tools.Get("knowledge_graph_search")
+	_, hasMemoryExpand := l.tools.Get("memory_expand")
 
 	// Per-user workspace: show the user's subdirectory in the system prompt.
 	// Uses cached workspace from userSetups (includes channel isolation).
@@ -254,6 +255,7 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		ToolDescs:              toolDescs,
 		SkillsSummary:          l.resolveSkillsSummary(ctx, skillFilter),
 		HasMemory:              l.hasMemory,
+		HasMemoryExpand:        hasMemoryExpand,
 		HasSpawn:               l.tools != nil && hasSpawn,
 		HasTeam:                hasTeamTools,
 		TeamWorkspace:          tools.ToolTeamWorkspaceFromCtx(ctx),
@@ -275,6 +277,11 @@ func (l *Loop) buildMessages(ctx context.Context, history []providers.Message, s
 		CredentialCLIContext:   l.buildCredentialCLIContext(ctx),
 		IsBootstrap:            hadBootstrap && l.agentType != store.AgentTypePredefined,
 	})
+	if !hadBootstrap {
+		if autoSection := l.buildAutoMemorySection(ctx, userMessage); autoSection != "" {
+			systemPrompt += "\n\n" + autoSection
+		}
+	}
 
 	messages = append(messages, providers.Message{
 		Role:    "system",

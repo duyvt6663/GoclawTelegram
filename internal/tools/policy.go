@@ -15,7 +15,7 @@ var toolGroupsMu sync.RWMutex
 
 // Tool groups map group names to tool names.
 var toolGroups = map[string][]string{
-	"memory":     {"memory_search", "memory_get"},
+	"memory":     {"memory_search", "memory_expand", "memory_get"},
 	"web":        {"web_search", "linkup_web_search", "linkedin_jobs_proxy_search", "web_fetch"},
 	"fs":         {"read_file", "write_file", "list_files", "edit"},
 	"runtime":    {"exec"},
@@ -28,7 +28,7 @@ var toolGroups = map[string][]string{
 	"goclaw": {
 		"read_file", "write_file", "list_files", "edit", "exec",
 		"web_search", "linkup_web_search", "linkedin_jobs_proxy_search", "web_fetch", "browser",
-		"memory_search", "memory_get",
+		"memory_search", "memory_expand", "memory_get",
 		"sessions_list", "sessions_history", "sessions_send", "spawn", "session_status",
 		"cron", "message", "create_forum_topic", "create_so_dau_bai_poll", "create_so_dau_bai_pardon_poll", "list_group_members",
 		"read_image", "read_document", "read_audio", "read_video",
@@ -79,7 +79,7 @@ func LegacyToolAliases() map[string]string {
 var subagentDenyList = []string{
 	"exec", // subagents should not shell out — main agent can still exec
 	"gateway", "agents_list", "whatsapp_login", "session_status",
-	"cron", "memory_search", "memory_get", "sessions_send",
+	"cron", "memory_search", "memory_expand", "memory_get", "sessions_send",
 }
 
 // Leaf subagent deny — additional restrictions at max spawn depth.

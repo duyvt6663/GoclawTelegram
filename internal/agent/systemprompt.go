@@ -22,27 +22,28 @@ const (
 // SystemPromptConfig holds all inputs for system prompt construction.
 // Matches the params of TS buildAgentSystemPrompt().
 type SystemPromptConfig struct {
-	AgentID       string
-	Model         string
-	Workspace     string
-	Channel       string                  // runtime channel instance name (e.g. "my-telegram-bot")
-	ChannelType   string                  // platform type (e.g. "zalo_personal", "telegram")
-	ChatTitle     string                  // group chat display name (shown in identity line)
-	PeerKind      string                  // "direct" or "group"
-	OwnerIDs      []string                // owner sender IDs
-	Mode          PromptMode              // full or minimal
-	ToolNames     []string                // registered tool names
-	ToolDescs     map[string]string       // live tool descriptions from the registry
-	SkillsSummary string                  // XML from skills.Loader.BuildSummary()
-	HasMemory     bool                    // memory_search/memory_get available?
-	HasSpawn      bool                    // spawn tool available?
-	HasTeam       bool                    // agent belongs to a team? (skips generic spawn section)
-	TeamWorkspace string                  // absolute path to team shared workspace (empty if not in team)
-	TeamMembers   []store.TeamMemberData  // team member roster for task assignment
-	TeamGuidance  string                  // edition-specific guidance from TeamActionPolicy.MemberGuidance()
-	ContextFiles  []bootstrap.ContextFile // bootstrap files for # Project Context
-	ExtraPrompt   string                  // extra system prompt (subagent context, etc.)
-	AgentType     string                  // "open" or "predefined" — affects context file framing
+	AgentID         string
+	Model           string
+	Workspace       string
+	Channel         string                  // runtime channel instance name (e.g. "my-telegram-bot")
+	ChannelType     string                  // platform type (e.g. "zalo_personal", "telegram")
+	ChatTitle       string                  // group chat display name (shown in identity line)
+	PeerKind        string                  // "direct" or "group"
+	OwnerIDs        []string                // owner sender IDs
+	Mode            PromptMode              // full or minimal
+	ToolNames       []string                // registered tool names
+	ToolDescs       map[string]string       // live tool descriptions from the registry
+	SkillsSummary   string                  // XML from skills.Loader.BuildSummary()
+	HasMemory       bool                    // memory_search/memory_get available?
+	HasMemoryExpand bool                    // memory_expand tool registered?
+	HasSpawn        bool                    // spawn tool available?
+	HasTeam         bool                    // agent belongs to a team? (skips generic spawn section)
+	TeamWorkspace   string                  // absolute path to team shared workspace (empty if not in team)
+	TeamMembers     []store.TeamMemberData  // team member roster for task assignment
+	TeamGuidance    string                  // edition-specific guidance from TeamActionPolicy.MemberGuidance()
+	ContextFiles    []bootstrap.ContextFile // bootstrap files for # Project Context
+	ExtraPrompt     string                  // extra system prompt (subagent context, etc.)
+	AgentType       string                  // "open" or "predefined" — affects context file framing
 
 	HasSkillSearch    bool              // skill_search tool registered? (for search-mode prompt)
 	HasSkillManage    bool              // skill_manage tool registered + skill_evolve enabled for this agent
@@ -79,6 +80,7 @@ var coreToolSummaries = map[string]string{
 	"list_files":                    "List directory contents",
 	"exec":                          "Run shell commands",
 	"memory_search":                 "Search indexed memory files (MEMORY.md + memory/*.md)",
+	"memory_expand":                 "Load full episodic summaries returned by memory_search",
 	"memory_get":                    "Read specific sections of memory files",
 	"spawn":                         "Spawn a self-clone subagent to handle a task in the background",
 	"web_search":                    "Search the web",
@@ -322,6 +324,9 @@ func BuildSystemPrompt(cfg SystemPromptConfig) string {
 		}
 		if !isMinimal && cfg.HasMemory {
 			memReminder := "Reminder: Before answering questions about prior work, decisions, or preferences, always run memory_search first."
+			if cfg.HasMemoryExpand {
+				memReminder += " If memory_search returns episodic results with IDs, use memory_expand(id) for full session details."
+			}
 			if cfg.HasKnowledgeGraph {
 				memReminder += " Also run knowledge_graph_search when the question involves people, teams, projects, or connections — it finds relationship paths that memory_search misses."
 			}

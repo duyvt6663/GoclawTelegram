@@ -165,6 +165,7 @@ func wireExtras(
 		ModelPricing:           appCfg.Telemetry.ModelPricing,
 		TracingStore:           stores.Tracing,
 		MemoryStore:            stores.Memory,
+		EpisodicStore:          stores.Episodic,
 		TenantStore:            stores.Tenants,
 		BuiltinToolTenantCfgs:  stores.BuiltinToolTenantCfgs,
 		SkillTenantCfgs:        stores.SkillTenantCfgs,
@@ -287,6 +288,17 @@ func wireExtras(
 			}
 		}
 		slog.Info("memory layering enabled")
+	}
+
+	if stores.Episodic != nil {
+		for _, toolName := range []string{"memory_search", "memory_expand"} {
+			if t, ok := toolsReg.Get(toolName); ok {
+				if ea, ok := t.(tools.EpisodicStoreAware); ok {
+					ea.SetEpisodicStore(stores.Episodic)
+				}
+			}
+		}
+		slog.Info("episodic memory wired")
 	}
 
 	// Wire knowledge graph store on KG tool + hint in memory_search results

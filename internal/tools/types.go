@@ -67,6 +67,11 @@ type MemoryStoreAware interface {
 	SetMemoryStore(store.MemoryStore)
 }
 
+// EpisodicStoreAware tools can receive an EpisodicStore for v3-style session memory.
+type EpisodicStoreAware interface {
+	SetEpisodicStore(store.EpisodicStore)
+}
+
 // EmbeddingProviderAware tools can receive a text embedding provider.
 type EmbeddingProviderAware interface {
 	SetEmbeddingProvider(store.EmbeddingProvider)
