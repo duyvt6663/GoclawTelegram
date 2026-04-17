@@ -18,9 +18,11 @@ type handler struct {
 func (h *handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/beta/job-crawler/configs", httpapi.RequireAuth("", h.handleList))
 	mux.HandleFunc("GET /v1/beta/job-crawler/configs/{key}", httpapi.RequireAuth("", h.handleGet))
+	mux.HandleFunc("GET /v1/beta/job-crawler/configs/{key}/traces", httpapi.RequireAuth("", h.handleConfigTraces))
 	mux.HandleFunc("PUT /v1/beta/job-crawler/configs/{key}", httpapi.RequireAuth(permissions.RoleOperator, h.handleUpsert))
 	mux.HandleFunc("POST /v1/beta/job-crawler/configs/{key}/run", httpapi.RequireAuth(permissions.RoleOperator, h.handleRun))
 	mux.HandleFunc("POST /v1/beta/job-crawler/configs/{key}/run-dynamic", httpapi.RequireAuth(permissions.RoleOperator, h.handleRunDynamic))
+	mux.HandleFunc("GET /v1/beta/job-crawler/runs/{runID}/traces", httpapi.RequireAuth("", h.handleRunTraces))
 }
 
 func (h *handler) handleList(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +46,38 @@ func (h *handler) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpapi.WriteJSON(w, http.StatusOK, status)
+}
+
+func (h *handler) handleConfigTraces(w http.ResponseWriter, r *http.Request) {
+	result, err := h.feature.traceResultForRequest(
+		tenantKeyFromCtx(r.Context()),
+		r.PathValue("key"),
+		r.URL.Query().Get("run_id"),
+		"",
+		"",
+		0,
+	)
+	if err != nil {
+		httpapi.WriteError(w, http.StatusNotFound, protocol.ErrNotFound, err.Error())
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, result)
+}
+
+func (h *handler) handleRunTraces(w http.ResponseWriter, r *http.Request) {
+	result, err := h.feature.traceResultForRequest(
+		tenantKeyFromCtx(r.Context()),
+		"",
+		r.PathValue("runID"),
+		"",
+		"",
+		0,
+	)
+	if err != nil {
+		httpapi.WriteError(w, http.StatusNotFound, protocol.ErrNotFound, err.Error())
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, result)
 }
 
 func (h *handler) handleUpsert(w http.ResponseWriter, r *http.Request) {

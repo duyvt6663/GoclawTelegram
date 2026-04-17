@@ -36,27 +36,35 @@ var (
 		roleMLEngineer,
 	}
 	roleAliases = map[string]string{
-		"software engineer":         roleSoftwareEngineer,
-		"software_engineer":         roleSoftwareEngineer,
-		"software developer":        roleSoftwareEngineer,
-		"backend":                   roleBackend,
-		"backend engineer":          roleBackend,
-		"back end":                  roleBackend,
-		"front end":                 roleFrontend,
-		"frontend":                  roleFrontend,
-		"frontend engineer":         roleFrontend,
-		"full stack":                roleFullstack,
-		"full-stack":                roleFullstack,
-		"fullstack":                 roleFullstack,
-		"ai engineer":               roleAIEngineer,
-		"ai_engineer":               roleAIEngineer,
-		"llm engineer":              roleAIEngineer,
-		"applied ai":                roleAIEngineer,
-		"genai engineer":            roleAIEngineer,
-		"ml engineer":               roleMLEngineer,
-		"ml_engineer":               roleMLEngineer,
-		"machine learning engineer": roleMLEngineer,
-		"mlops":                     roleMLEngineer,
+		"software engineer":                roleSoftwareEngineer,
+		"software_engineer":                roleSoftwareEngineer,
+		"software developer":               roleSoftwareEngineer,
+		"backend":                          roleBackend,
+		"backend engineer":                 roleBackend,
+		"back end":                         roleBackend,
+		"front end":                        roleFrontend,
+		"frontend":                         roleFrontend,
+		"frontend engineer":                roleFrontend,
+		"full stack":                       roleFullstack,
+		"full-stack":                       roleFullstack,
+		"fullstack":                        roleFullstack,
+		"ai engineer":                      roleAIEngineer,
+		"ai_engineer":                      roleAIEngineer,
+		"artificial intelligence engineer": roleAIEngineer,
+		"llm engineer":                     roleAIEngineer,
+		"applied ai":                       roleAIEngineer,
+		"applied ai engineer":              roleAIEngineer,
+		"generative ai engineer":           roleAIEngineer,
+		"genai":                            roleAIEngineer,
+		"genai engineer":                   roleAIEngineer,
+		"ml engineer":                      roleMLEngineer,
+		"ml_engineer":                      roleMLEngineer,
+		"machine learning engineer":        roleMLEngineer,
+		"deep learning engineer":           roleMLEngineer,
+		"nlp engineer":                     roleMLEngineer,
+		"computer vision engineer":         roleMLEngineer,
+		"cv engineer":                      roleMLEngineer,
+		"mlops":                            roleMLEngineer,
 	}
 	seniorityAliases = map[string]string{
 		"":               "",
@@ -105,12 +113,50 @@ var (
 		role    string
 		phrases []string
 	}{
-		{role: roleAIEngineer, phrases: []string{"ai engineer", "applied ai", "llm engineer", "genai engineer", "generative ai engineer"}},
-		{role: roleMLEngineer, phrases: []string{"ml engineer", "machine learning engineer", "mlops engineer", "mlops"}},
+		{role: roleAIEngineer, phrases: []string{"ai engineer", "artificial intelligence engineer", "applied ai", "applied ai engineer", "llm engineer", "genai engineer", "generative ai engineer"}},
+		{role: roleMLEngineer, phrases: []string{"ml engineer", "machine learning engineer", "mlops engineer", "mlops", "deep learning engineer", "nlp engineer", "computer vision engineer", "cv engineer"}},
 		{role: roleFullstack, phrases: []string{"fullstack", "fullstack engineer", "fullstack developer"}},
 		{role: roleBackend, phrases: []string{"backend", "backend engineer", "backend developer", "server side", "api engineer"}},
 		{role: roleFrontend, phrases: []string{"frontend", "frontend engineer", "frontend developer", "ui engineer", "web engineer"}},
 		{role: roleSoftwareEngineer, phrases: []string{"software engineer", "software developer", "application engineer", "application developer"}},
+	}
+	hardAITitlePhrases = []string{
+		"ai",
+		"artificial intelligence",
+		"applied ai",
+		"generative ai",
+		"genai",
+		"llm",
+		"large language model",
+		"machine learning",
+		"ml",
+		"nlp",
+		"natural language processing",
+		"computer vision",
+		"cv engineer",
+		"deep learning",
+	}
+	explicitNonAITitlePhrases = []string{
+		"frontend",
+		"front end",
+		"backend",
+		"back end",
+		"fullstack",
+		"full stack",
+		"software engineer",
+		"software developer",
+		"devops",
+		"devops engineer",
+		"sre",
+		"site reliability",
+		"platform engineer",
+		"mobile engineer",
+		"ios engineer",
+		"android engineer",
+		"qa engineer",
+		"quality assurance",
+		"test automation",
+		"data engineer",
 	}
 	hardMismatchPhrases = []string{
 		"product manager",
@@ -230,6 +276,28 @@ func normalizeAllowedRoles(values []string) []string {
 	return out
 }
 
+func isAIRole(role string) bool {
+	switch normalizeRoleID(role) {
+	case roleAIEngineer, roleMLEngineer:
+		return true
+	default:
+		return false
+	}
+}
+
+func allowedRolesAreAIOnly(values []string) bool {
+	values = normalizeOptionalRoles(values)
+	if len(values) == 0 {
+		return false
+	}
+	for _, role := range values {
+		if !isAIRole(role) {
+			return false
+		}
+	}
+	return true
+}
+
 func normalizeSeniorityLevel(value string) string {
 	value = normalizeComparableText(value)
 	if value == "" {
@@ -339,6 +407,28 @@ func classifyRole(title, tags, body string) roleProfile {
 		profile.PrimaryRole = titleRoles[0]
 		profile.Engineering = true
 		profile.SpecificTitleRole = true
+		if !isAIRole(profile.PrimaryRole) {
+			return profile
+		}
+		return profile
+	}
+	if role := explicitTitleRoleOverride(titleNorm); role != "" {
+		profile.Roles = []string{role}
+		profile.PrimaryRole = role
+		profile.Engineering = true
+		profile.SpecificTitleRole = true
+		return profile
+	}
+	if titleHasAISignal(titleNorm) && hasAnyPhrase(titleNorm, "engineer", "developer", "scientist", "researcher") {
+		profile.Engineering = true
+		profile.SpecificTitleRole = true
+		if hasAnyPhrase(titleNorm, "machine learning", "ml", "nlp", "natural language processing", "computer vision", "cv engineer", "deep learning") {
+			profile.Roles = []string{roleMLEngineer}
+			profile.PrimaryRole = roleMLEngineer
+		} else {
+			profile.Roles = []string{roleAIEngineer}
+			profile.PrimaryRole = roleAIEngineer
+		}
 		return profile
 	}
 	if hasAnyPhrase(titleNorm, softMismatchPhrases...) {
@@ -376,6 +466,36 @@ func classifyRole(title, tags, body string) roleProfile {
 	}
 
 	return profile
+}
+
+func titleHasAISignal(title string) bool {
+	title = normalizeComparableText(title)
+	if title == "" {
+		return false
+	}
+	if hasAnyPhrase(title, hardAITitlePhrases...) {
+		return true
+	}
+	return hasAnyPhrase(title, "ai", "ml", "llm", "nlp") &&
+		hasAnyPhrase(title, "engineer", "developer", "scientist", "researcher")
+}
+
+func explicitTitleRoleOverride(title string) string {
+	title = normalizeComparableText(title)
+	switch {
+	case title == "":
+		return ""
+	case hasAnyPhrase(title, "frontend", "front end", "frontend engineer", "frontend developer", "ui engineer", "web engineer"):
+		return roleFrontend
+	case hasAnyPhrase(title, "backend", "back end", "backend engineer", "backend developer", "server side", "api engineer"):
+		return roleBackend
+	case hasAnyPhrase(title, "fullstack", "full stack", "fullstack engineer", "fullstack developer"):
+		return roleFullstack
+	case hasAnyPhrase(title, explicitNonAITitlePhrases...):
+		return roleSoftwareEngineer
+	default:
+		return ""
+	}
 }
 
 func matchedRoles(normalizedText string) []string {

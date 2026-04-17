@@ -370,10 +370,17 @@ func effectiveSourceIDs(cfg *JobCrawlerConfig) []string {
 
 func buildLinkedInProxyIntent(cfg *JobCrawlerConfig) string {
 	if cfg == nil {
-		return "AI engineer machine learning engineer remote"
+		return "AI engineer applied ai machine learning llm nlp computer vision remote"
 	}
 
-	parts := []string{"AI engineer", "machine learning engineer"}
+	parts := []string{
+		"AI engineer",
+		"Applied AI",
+		"Machine Learning",
+		"LLM",
+		"NLP",
+		"Computer Vision",
+	}
 	switch cfg.LocationMode {
 	case locationModeVietnam:
 		parts = append(parts, "Vietnam")
@@ -387,26 +394,44 @@ func buildLinkedInProxyIntent(cfg *JobCrawlerConfig) string {
 			continue
 		}
 		parts = append(parts, keyword)
-		if len(parts) >= 6 {
+		if len(parts) >= 9 {
 			break
 		}
 	}
-	return cleanText(strings.Join(parts, " "))
+	return cleanText(strings.Join(dedupeTextList(parts), " "))
 }
 
 func resolveLinkedInProxyMaxResults(cfg *JobCrawlerConfig) int {
-	base := defaultMaxResults * 4
+	base := defaultMaxResults * 5
 	if cfg != nil && cfg.MaxResults > 0 {
-		base = cfg.MaxResults * 4
+		base = cfg.MaxResults * 5
 	}
 	switch {
-	case base < 18:
-		return 18
-	case base > 32:
-		return 32
+	case base < 24:
+		return 24
+	case base > 40:
+		return 40
 	default:
 		return base
 	}
+}
+
+func dedupeTextList(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = cleanText(value)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func parseRFC3339(value string) *time.Time {

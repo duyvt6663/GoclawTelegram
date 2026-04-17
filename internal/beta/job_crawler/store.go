@@ -2,8 +2,10 @@ package jobcrawler
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -246,10 +248,30 @@ func (s *featureStore) migrate() error {
 			UNIQUE (tenant_id, embedding_kind, subject_hash, provider_name, model)
 		)
 		`,
+		`
+		CREATE TABLE IF NOT EXISTS beta_job_crawler_run_traces (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL DEFAULT '',
+			run_id TEXT NOT NULL,
+			config_id TEXT NOT NULL,
+			trace_id TEXT NOT NULL DEFAULT '',
+			job_hash TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			company TEXT NOT NULL DEFAULT '',
+			url TEXT NOT NULL DEFAULT '',
+			final_outcome TEXT NOT NULL DEFAULT '',
+			score REAL NOT NULL DEFAULT 0,
+			trace_json TEXT NOT NULL DEFAULT '{}',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE (tenant_id, run_id, trace_id)
+		)
+		`,
 		`CREATE INDEX IF NOT EXISTS idx_beta_job_crawler_configs_enabled ON beta_job_crawler_configs(tenant_id, enabled)`,
 		`CREATE INDEX IF NOT EXISTS idx_beta_job_crawler_runs_lookup ON beta_job_crawler_runs(tenant_id, config_id, local_date, trigger_kind, started_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_beta_job_crawler_seen_jobs_posted ON beta_job_crawler_seen_jobs(tenant_id, config_id, last_posted_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_beta_job_crawler_embeddings_lookup ON beta_job_crawler_embeddings(tenant_id, embedding_kind, subject_hash, provider_name, model)`,
+		`CREATE INDEX IF NOT EXISTS idx_beta_job_crawler_run_traces_lookup ON beta_job_crawler_run_traces(tenant_id, run_id, created_at)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -358,6 +380,21 @@ func (s *featureStore) getConfigByKey(tenantID, key string) (*JobCrawlerConfig, 
 		FROM beta_job_crawler_configs
 		WHERE tenant_id=$1 AND config_key=$2`,
 		tenantID, normalizeConfigKey(key),
+	)
+	return scanJobCrawlerConfig(row)
+}
+
+func (s *featureStore) getConfigByID(tenantID, configID string) (*JobCrawlerConfig, error) {
+	row := s.db.QueryRow(`
+		SELECT id, tenant_id, config_key, name, channel, chat_id, thread_id, timezone,
+		       keywords_include, keywords_exclude, allowed_roles, max_seniority_level, remote_only, location_mode,
+		       remote_priority, vietnam_priority, sources, post_time, max_results,
+		       dedupe_window_days, include_ai_summary, enable_linkedin_proxy_source, hard_title_filter,
+		       enable_llm_rerank, llm_rerank_top_n,
+		       enabled, created_at, updated_at
+		FROM beta_job_crawler_configs
+		WHERE tenant_id=$1 AND id=$2`,
+		tenantID, strings.TrimSpace(configID),
 	)
 	return scanJobCrawlerConfig(row)
 }
@@ -510,6 +547,17 @@ func (s *featureStore) lastRunByConfig(tenantID, configID string) (*JobCrawlerRu
 	return scanJobCrawlerRun(row)
 }
 
+func (s *featureStore) getRunByID(tenantID, runID string) (*JobCrawlerRun, error) {
+	row := s.db.QueryRow(`
+		SELECT id, tenant_id, config_id, local_date, trigger_kind, status,
+		       total_fetched, total_filtered, total_posted, error_text, started_at, finished_at
+		FROM beta_job_crawler_runs
+		WHERE tenant_id=$1 AND id=$2`,
+		tenantID, strings.TrimSpace(runID),
+	)
+	return scanJobCrawlerRun(row)
+}
+
 func (s *featureStore) recentlyPostedJobs(tenantID, configID string, since time.Time) ([]RecentSeenJob, error) {
 	rows, err := s.db.Query(`
 		SELECT job_hash, company, title, normalized_title, seniority_level, content_tokens, last_posted_at
@@ -601,6 +649,86 @@ func (s *featureStore) upsertSeenJob(cfg *JobCrawlerConfig, snapshot SeenJobSnap
 	default:
 		return err
 	}
+}
+
+func (s *featureStore) replaceRunDecisionTraces(run *JobCrawlerRun, traces []JobDecisionTrace) error {
+	if s == nil || s.db == nil || run == nil {
+		return nil
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`
+		DELETE FROM beta_job_crawler_run_traces
+		WHERE tenant_id=$1 AND run_id=$2`,
+		run.TenantID, run.ID,
+	); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	for _, trace := range traces {
+		traceJSON, err := json.Marshal(trace)
+		if err != nil {
+			return err
+		}
+		traceID := strings.TrimSpace(trace.TraceID)
+		if traceID == "" {
+			traceID = makeTraceID(trace.Source, trace.Title, trace.Company, trace.URL)
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO beta_job_crawler_run_traces (
+				id, tenant_id, run_id, config_id, trace_id, job_hash, source, title, company, url,
+				final_outcome, score, trace_json, created_at
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+			uuid.NewString(), run.TenantID, run.ID, run.ConfigID, traceID, trace.JobHash, trace.Source,
+			trace.Title, trace.Company, trace.URL, trace.FinalOutcome, trace.Score, string(traceJSON), now,
+		); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (s *featureStore) listRunDecisionTraces(tenantID, runID string) ([]JobDecisionTrace, error) {
+	rows, err := s.db.Query(`
+		SELECT trace_id, trace_json
+		FROM beta_job_crawler_run_traces
+		WHERE tenant_id=$1 AND run_id=$2
+		ORDER BY created_at ASC, trace_id ASC`,
+		tenantID, strings.TrimSpace(runID),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []JobDecisionTrace
+	for rows.Next() {
+		var traceID string
+		var traceJSON string
+		if err := rows.Scan(&traceID, &traceJSON); err != nil {
+			return nil, err
+		}
+		var trace JobDecisionTrace
+		if err := json.Unmarshal([]byte(traceJSON), &trace); err != nil {
+			return nil, err
+		}
+		if trace.TraceID == "" {
+			trace.TraceID = strings.TrimSpace(traceID)
+		}
+		out = append(out, trace)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (s *featureStore) cachedEmbedding(tenantID, kind, subjectHash, providerName, model, contentHash string) ([]float32, error) {

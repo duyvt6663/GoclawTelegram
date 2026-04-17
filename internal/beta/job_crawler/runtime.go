@@ -117,6 +117,9 @@ func (f *JobCrawlerFeature) upsertConfigForTenant(tenantID string, cfg JobCrawle
 	if cfg.MaxSeniorityLevel != "" {
 		cfg.MaxSeniorityLevel = normalizeSeniorityLevel(cfg.MaxSeniorityLevel)
 	}
+	if err := validateCrawlerConfigSafety(&cfg); err != nil {
+		return nil, err
+	}
 	cfg.Sources = normalizeSources(cfg.Sources)
 	sourceIDs := effectiveSourceIDs(&cfg)
 	if len(sourceIDs) == 0 {
@@ -295,10 +298,16 @@ func (f *JobCrawlerFeature) runCrawlerRequest(ctx context.Context, cfg *JobCrawl
 		DynamicQuery:  request.DynamicQuery,
 		DynamicConfig: request.DynamicConfig,
 	}
+	var traceSet *decisionTraceSet
 	defer func() {
 		if retErr != nil {
 			run.Status = runStatusFailed
 			run.ErrorText = retErr.Error()
+		}
+		if traceSet != nil {
+			if err := f.store.replaceRunDecisionTraces(run, traceSet.list()); err != nil {
+				slog.Warn("beta job crawler: failed to persist decision traces", "config", cfg.Key, "run", run.ID, "error", err)
+			}
 		}
 		if run.Status == "" {
 			run.Status = runStatusNoResults
@@ -327,6 +336,7 @@ func (f *JobCrawlerFeature) runCrawlerRequest(ctx context.Context, cfg *JobCrawl
 		allJobs = append(allJobs, jobs...)
 	}
 	run.TotalFetched = len(allJobs)
+	logFetchedStageSummary(cfg, run, allJobs)
 	if len(allJobs) == 0 {
 		if sourceFailures == len(sourceIDs) {
 			return result, fmt.Errorf("all configured sources failed")
@@ -340,20 +350,29 @@ func (f *JobCrawlerFeature) runCrawlerRequest(ctx context.Context, cfg *JobCrawl
 		return result, err
 	}
 
-	ranked, profileText, rankWarnings, err := f.rankJobs(ctx, cfg, allJobs, recentlyPosted, now, request.DynamicConfig)
+	ranked, traceSet, profileText, rankWarnings, err := f.rankJobs(ctx, cfg, allJobs, recentlyPosted, now, request.DynamicConfig)
 	if err != nil {
 		return result, err
 	}
 	result.Warnings = append(result.Warnings, rankWarnings...)
+	logTraceStageSummary(cfg, run, "filtered", traceSet)
+	logTraceStageSummary(cfg, run, "scored", traceSet)
+	logTraceStageSummary(cfg, run, "dedupe", traceSet)
 	run.TotalFiltered = len(ranked)
 	if len(ranked) == 0 {
 		run.Status = runStatusNoResults
 		return result, nil
 	}
 
-	reranked, rerankWarnings := f.maybeRerankJobs(ctx, cfg, ranked, profileText, request.DynamicConfig)
+	reranked, rerankWarnings, rerankFallback := f.maybeRerankJobs(ctx, cfg, ranked, profileText, request.DynamicConfig)
 	result.Warnings = append(result.Warnings, rerankWarnings...)
 	ranked = reranked
+	if traceSet != nil && cfg.EnableLLMRerank {
+		traceSet.markReranked(ranked, resolveLLMRerankTopN(cfg), rerankFallback)
+	}
+	if cfg.EnableLLMRerank {
+		slog.Info("beta job crawler stage", "config", cfg.Key, "run", run.ID, "stage", "rerank", "enabled", true, "fallback", rerankFallback, "warnings", rerankWarnings)
+	}
 
 	limit := cfg.MaxResults
 	if request.LimitOverride > 0 {
@@ -378,6 +397,10 @@ func (f *JobCrawlerFeature) runCrawlerRequest(ctx context.Context, cfg *JobCrawl
 	content := formatDigestMessage(cfg, top, run.LocalDate, request.DynamicQuery)
 	if err := f.postDigest(ctx, cfg, content); err != nil {
 		return result, err
+	}
+	if traceSet != nil {
+		traceSet.markPostSelection(top, ranked[limit:])
+		logTraceStageSummary(cfg, run, "post", traceSet)
 	}
 
 	postedAt := now
@@ -409,7 +432,7 @@ func (f *JobCrawlerFeature) runCrawlerRequest(ctx context.Context, cfg *JobCrawl
 	return result, nil
 }
 
-func (f *JobCrawlerFeature) rankJobs(ctx context.Context, cfg *JobCrawlerConfig, jobs []JobListing, recentlyPosted []RecentSeenJob, now time.Time, dynamic *DynamicRankingConfig) ([]RankedJob, string, []string, error) {
+func (f *JobCrawlerFeature) rankJobs(ctx context.Context, cfg *JobCrawlerConfig, jobs []JobListing, recentlyPosted []RecentSeenJob, now time.Time, dynamic *DynamicRankingConfig) ([]RankedJob, *decisionTraceSet, string, []string, error) {
 	maxSeniority := resolveMaxSeniorityRank(cfg)
 	if dynamic != nil && dynamic.SeniorityCapOverride != "" {
 		maxSeniority = resolveMaxSeniorityRank(&JobCrawlerConfig{MaxSeniorityLevel: dynamic.SeniorityCapOverride})
@@ -418,14 +441,19 @@ func (f *JobCrawlerFeature) rankJobs(ctx context.Context, cfg *JobCrawlerConfig,
 	warnings := make([]string, 0, 2)
 	semanticAvailable := false
 	profileText := buildSemanticProfileText(cfg, dynamic)
+	traceSet := newDecisionTraceSet()
 	jobEmbeddings := make(map[string][]float32)
 	var profileEmbedding []float32
+	allowedRoles := effectiveAllowedRoles(cfg, dynamic)
+	strictAIRoleSanity := requiresAIRoleSanityFilter(cfg, allowedRoles)
 
 	for _, raw := range jobs {
 		title := cleanText(raw.Title)
 		company := cleanText(raw.Company)
 		jobURL := canonicalizeURL(raw.URL)
+		trace := traceSet.noteRaw(raw.Source, title, company, jobURL, "fetched", "kept")
 		if title == "" || company == "" || jobURL == "" {
+			traceSet.noteStage(trace, "filtered", "dropped", "missing_title_company_or_url")
 			continue
 		}
 
@@ -433,32 +461,54 @@ func (f *JobCrawlerFeature) rankJobs(ctx context.Context, cfg *JobCrawlerConfig,
 		textTags := strings.Join(tags, " ")
 		textBody := cleanText(strings.Join([]string{raw.Description, raw.Location, company}, " "))
 
-		excluded := false
-		for _, keyword := range cfg.KeywordsExclude {
-			if keywordMatchScore(keyword, title, textTags, textBody) > 0 {
-				excluded = true
-				break
-			}
-		}
-		if excluded {
+		if cfg.HardTitleFilter && !titleHasAISignal(title) {
+			traceSet.noteStage(trace, "filtered", "dropped", "hard_title_filter_missing_ai_title")
 			continue
 		}
 
-		roleEval := evaluateRoleFit(effectiveAllowedRoles(cfg, dynamic), title, textTags, textBody)
+		if keyword := firstMatchingKeyword(cfg.KeywordsExclude, title, textTags, textBody); keyword != "" {
+			traceSet.noteStage(trace, "filtered", "dropped", "keywords_exclude:"+keyword)
+			continue
+		}
+
+		roleEval := evaluateRoleFit(allowedRoles, title, textTags, textBody)
+		roleType := roleEval.PrimaryRole
+		if roleType == "" && len(roleEval.MatchedAllowed) > 0 {
+			roleType = roleEval.MatchedAllowed[0]
+		}
+		if trace != nil {
+			trace.RoleType = roleType
+		}
 		if roleEval.Exclude {
+			reason := "role_classifier_excluded"
+			if roleType != "" {
+				reason += ":" + roleType
+			}
+			traceSet.noteStage(trace, "filtered", "dropped", reason)
+			continue
+		}
+		if strictAIRoleSanity && !isAIRole(roleType) {
+			reason := "post_filter_non_ai_role"
+			if roleType != "" {
+				reason += ":" + roleType
+			}
+			traceSet.noteStage(trace, "filtered", "dropped", reason)
 			continue
 		}
 
 		seniorityLevel := detectSeniorityLevel(title, textTags)
 		if shouldExcludeBySeniority(seniorityLevel, maxSeniority) {
+			traceSet.noteStage(trace, "filtered", "dropped", "seniority_cap")
 			continue
 		}
 
 		location := normalizeLocation(strings.Join([]string{raw.Location, textTags, raw.Description}, " "), raw.AssumeRemote)
 		if cfg.RemoteOnly && !location.IsRemote {
+			traceSet.noteStage(trace, "filtered", "dropped", "remote_only_mismatch")
 			continue
 		}
 
+		traceID, jobHash := buildTraceIdentifiers(raw.Source, title, company, jobURL)
 		candidate := RankedJob{
 			JobListing: JobListing{
 				Source:       raw.Source,
@@ -472,8 +522,8 @@ func (f *JobCrawlerFeature) rankJobs(ctx context.Context, cfg *JobCrawlerConfig,
 				Description:  raw.Description,
 				AssumeRemote: raw.AssumeRemote,
 			},
-			JobHash:            makeJobHash(title, company, jobURL),
-			RoleType:           roleEval.PrimaryRole,
+			JobHash:            jobHash,
+			RoleType:           roleType,
 			SeniorityLevel:     seniorityLevel,
 			NormalizedLocation: location.Label,
 			IsRemote:           location.IsRemote,
@@ -481,23 +531,23 @@ func (f *JobCrawlerFeature) rankJobs(ctx context.Context, cfg *JobCrawlerConfig,
 			IsAsia:             location.IsAsia,
 			NormalizedTitle:    normalizeTitleForDedupe(title),
 			ContentTokens:      contentTokensForJob(title, raw.Description),
+			TraceID:            traceID,
 		}
 		if len(candidate.ContentTokens) == 0 {
 			candidate.ContentTokens = contentTokensForJob(title, raw.Location)
 		}
-		if candidate.RoleType == "" && len(roleEval.MatchedAllowed) > 0 {
-			candidate.RoleType = roleEval.MatchedAllowed[0]
-		}
 
 		if postedAt := latestRecentPost(candidate, recentlyPosted); postedAt != nil {
 			candidate.LastPostedAt = postedAt
+			traceSet.noteStage(trace, "filtered", "dropped", "recently_posted")
 			continue
 		}
+		traceSet.noteStage(trace, "filtered", "kept")
 		candidates = append(candidates, candidate)
 	}
 
 	if len(candidates) == 0 {
-		return nil, profileText, warnings, nil
+		return nil, traceSet, profileText, warnings, nil
 	}
 
 	embeddingProvider, err := f.resolveEmbeddingProvider(ctx, cfg.TenantID)
@@ -528,12 +578,14 @@ func (f *JobCrawlerFeature) rankJobs(ctx context.Context, cfg *JobCrawlerConfig,
 
 	scored := make([]RankedJob, 0, len(candidates))
 	for _, candidate := range candidates {
+		trace := traceSet.ensureCandidate(candidate)
 		title := cleanText(candidate.Title)
 		textTags := strings.Join(candidate.Tags, " ")
 		textBody := cleanText(strings.Join([]string{candidate.Description, candidate.Location, candidate.Company}, " "))
 
 		keywordScore, matchedKeywords, includeEligible := computeStaticKeywordScore(cfg, semanticAvailable, title, textTags, textBody)
 		if !includeEligible {
+			traceSet.noteStage(trace, "scored", "dropped", "keywords_include_miss")
 			continue
 		}
 
@@ -544,7 +596,7 @@ func (f *JobCrawlerFeature) rankJobs(ctx context.Context, cfg *JobCrawlerConfig,
 			}
 		}
 
-		roleEval := evaluateRoleFit(effectiveAllowedRoles(cfg, dynamic), title, textTags, textBody)
+		roleEval := evaluateRoleFit(allowedRoles, title, textTags, textBody)
 		roleMatch, rolePenalty := computeRoleMatchAndPenalty(roleEval)
 		seniorityPenalty := computeSeniorityPenalty(candidate.SeniorityLevel, maxSeniority)
 		locationWeight := computeLocationWeight(cfg, normalizeLocation(strings.Join([]string{candidate.Location, textTags, candidate.Description}, " "), candidate.AssumeRemote))
@@ -555,14 +607,10 @@ func (f *JobCrawlerFeature) rankJobs(ctx context.Context, cfg *JobCrawlerConfig,
 		if dynamic != nil {
 			locationBoost, locationPenalty = computeLocationBiasBoost(dynamic.LocationBias, normalizeLocation(strings.Join([]string{candidate.Location, textTags, candidate.Description}, " "), candidate.AssumeRemote))
 		}
+		sourceBoost := computeSourceBoost(cfg, candidate.Source)
 		dynamicBoost := dynamicKeywordBoost + dynamicRoleBoost + locationBoost
 		penalties := rolePenalty + seniorityPenalty + computeDynamicKeywordPenalty(dynamic, title, textTags, textBody) + locationPenalty
-		score := semanticScore + keywordScore + locationWeight + roleMatch + recencyWeight + dynamicBoost - penalties
-		if score <= 0 {
-			continue
-		}
-
-		candidate.Score = score
+		candidate.SourceBoost = sourceBoost
 		candidate.SemanticScore = semanticScore
 		candidate.KeywordScore = keywordScore
 		candidate.LocationWeight = locationWeight
@@ -571,10 +619,29 @@ func (f *JobCrawlerFeature) rankJobs(ctx context.Context, cfg *JobCrawlerConfig,
 		candidate.DynamicBoost = dynamicBoost
 		candidate.PenaltyScore = penalties
 		candidate.MatchedKeywords = unionKeywordMatches(matchedKeywords, dynamicKeywordMatches)
+		candidate.Score = semanticScore + keywordScore + locationWeight + roleMatch + recencyWeight + dynamicBoost + sourceBoost - penalties
+		traceSet.updateScores(candidate)
+		if candidate.Score <= 0 {
+			traceSet.noteStage(trace, "scored", "dropped", "non_positive_score")
+			continue
+		}
+
+		traceSet.noteStage(trace, "scored", "kept")
 		scored = append(scored, candidate)
 	}
 
 	out := dedupeRankedCandidates(scored)
+	keptTraceIDs := make(map[string]struct{}, len(out))
+	for _, candidate := range out {
+		keptTraceIDs[candidate.TraceID] = struct{}{}
+	}
+	for _, candidate := range scored {
+		if _, ok := keptTraceIDs[candidate.TraceID]; ok {
+			traceSet.noteCandidate(candidate, "dedupe", "kept")
+			continue
+		}
+		traceSet.noteCandidate(candidate, "dedupe", "dropped", "duplicate_lower_score")
+	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Score != out[j].Score {
 			return out[i].Score > out[j].Score
@@ -590,7 +657,8 @@ func (f *JobCrawlerFeature) rankJobs(ctx context.Context, cfg *JobCrawlerConfig,
 			return out[i].PostedAt.After(*out[j].PostedAt)
 		}
 	})
-	return out, profileText, warnings, nil
+	traceSet.markRanked(out)
+	return out, traceSet, profileText, warnings, nil
 }
 
 func resolveMaxSeniorityRank(cfg *JobCrawlerConfig) int {
@@ -837,4 +905,83 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func validateCrawlerConfigSafety(cfg *JobCrawlerConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	overlap := make([]string, 0, len(cfg.KeywordsInclude))
+	excludeSet := make(map[string]struct{}, len(cfg.KeywordsExclude))
+	for _, keyword := range cfg.KeywordsExclude {
+		excludeSet[keyword] = struct{}{}
+	}
+	for _, keyword := range cfg.KeywordsInclude {
+		if _, ok := excludeSet[keyword]; ok {
+			overlap = append(overlap, keyword)
+		}
+	}
+	if len(overlap) > 0 {
+		return fmt.Errorf("keywords_include and keywords_exclude overlap: %s", strings.Join(overlap, ", "))
+	}
+	if cfg.HardTitleFilter && !allowedRolesAreAIOnly(cfg.AllowedRoles) {
+		return fmt.Errorf("hard_title_filter requires allowed_roles to contain only ai_engineer and/or ml_engineer")
+	}
+	return nil
+}
+
+func firstMatchingKeyword(keywords []string, title, tags, body string) string {
+	for _, keyword := range keywords {
+		if keywordMatchScore(keyword, title, tags, body) > 0 {
+			return keyword
+		}
+	}
+	return ""
+}
+
+func requiresAIRoleSanityFilter(cfg *JobCrawlerConfig, allowedRoles []string) bool {
+	if cfg != nil && cfg.HardTitleFilter {
+		return true
+	}
+	return allowedRolesAreAIOnly(allowedRoles)
+}
+
+func logFetchedStageSummary(cfg *JobCrawlerConfig, run *JobCrawlerRun, jobs []JobListing) {
+	if cfg == nil || run == nil {
+		return
+	}
+	sourceCounts := make(map[string]int)
+	for _, job := range jobs {
+		sourceCounts[strings.TrimSpace(job.Source)]++
+	}
+	slog.Info("beta job crawler stage", "config", cfg.Key, "run", run.ID, "stage", "fetched", "count", len(jobs), "sources", sourceCounts)
+}
+
+func logTraceStageSummary(cfg *JobCrawlerConfig, run *JobCrawlerRun, stage string, traces *decisionTraceSet) {
+	if cfg == nil || run == nil || traces == nil {
+		return
+	}
+	kept := 0
+	dropped := 0
+	reasonCounts := make(map[string]int)
+	for _, trace := range traces.list() {
+		for _, entry := range trace.Stages {
+			if entry.Stage != stage {
+				continue
+			}
+			if entry.Outcome == "dropped" {
+				dropped++
+			} else {
+				kept++
+			}
+			for _, reason := range entry.Reasons {
+				reasonCounts[reason]++
+			}
+			break
+		}
+	}
+	if kept == 0 && dropped == 0 {
+		return
+	}
+	slog.Info("beta job crawler stage", "config", cfg.Key, "run", run.ID, "stage", stage, "kept", kept, "dropped", dropped, "reasons", reasonCounts)
 }

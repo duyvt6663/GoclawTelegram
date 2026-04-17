@@ -23,9 +23,9 @@ const featureName = "job_crawler"
 // job feeds for Telegram chats.
 //
 // Plan:
-// 1. Add beta-local semantic primitives: embedding cache tables, provider resolution, and conservative API throttling.
-// 2. Rank v1.6 with semantic similarity first, then blend keyword, location, role, recency, dynamic boosts, and penalties.
-// 3. Support per-run natural-language overrides plus optional LLM rerank without mutating stored crawler configs.
+// 1. Enforce strict AI-topic filtering before ranking so explicit non-AI titles never survive on AI-only feeds.
+// 2. Stabilize LinkedIn recall and LLM rerank so boosted AI jobs still surface when the model path is flaky.
+// 3. Persist per-run decision traces and expose them through tools, RPC, and HTTP for future debugging.
 type JobCrawlerFeature struct {
 	config        *config.Config
 	stores        *store.Stores
@@ -82,6 +82,7 @@ func (f *JobCrawlerFeature) Init(deps beta.Deps) error {
 	topicrouting.RegisterTopicFeatureTools(
 		featureName,
 		(&configUpsertTool{}).Name(),
+		(&getTraceTool{}).Name(),
 		(&listConfigsTool{}).Name(),
 		(&runCrawlerTool{}).Name(),
 		(&runDynamicCrawlerTool{}).Name(),
@@ -89,6 +90,7 @@ func (f *JobCrawlerFeature) Init(deps beta.Deps) error {
 
 	if deps.ToolRegistry != nil {
 		deps.ToolRegistry.Register(&configUpsertTool{feature: f})
+		deps.ToolRegistry.Register(&getTraceTool{feature: f})
 		deps.ToolRegistry.Register(&listConfigsTool{feature: f})
 		deps.ToolRegistry.Register(&runCrawlerTool{feature: f})
 		deps.ToolRegistry.Register(&runDynamicCrawlerTool{feature: f})

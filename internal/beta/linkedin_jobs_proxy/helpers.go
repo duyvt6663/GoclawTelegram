@@ -29,8 +29,8 @@ const (
 	searchStatusFail     = "failed"
 	defaultMaxResults    = 16
 	maxMaxResults        = 40
-	defaultTopNPerQuery  = 8
-	maxTopNPerQuery      = 12
+	defaultTopNPerQuery  = 10
+	maxTopNPerQuery      = 16
 	defaultSearchIntent  = "AI engineer remote"
 )
 
@@ -78,19 +78,37 @@ type JobPreview struct {
 
 var (
 	hardTitlePhrases = []string{
-		"ai", "machine learning", "ml", "llm", "nlp", "computer vision",
+		"ai",
+		"artificial intelligence",
+		"applied ai",
+		"generative ai",
+		"genai",
+		"machine learning",
+		"ml",
+		"llm",
+		"nlp",
+		"natural language processing",
+		"computer vision",
+		"cv engineer",
+		"deep learning",
 	}
 	excludedPhrases = []string{
 		"frontend", "front end", "backend", "back end", "fullstack", "full stack",
 		"devops", "support", "manager", "product", "qa", "quality assurance",
 	}
+	explicitNonAITitlePhrases = []string{
+		"frontend", "front end", "backend", "back end", "fullstack", "full stack",
+		"software engineer", "software developer", "devops", "sre", "site reliability",
+		"platform engineer", "mobile engineer", "ios engineer", "android engineer",
+		"qa engineer", "quality assurance", "test automation", "data engineer",
+	}
 	aiRolePhrases = []string{
-		"ai engineer", "applied ai engineer", "applied ai", "llm engineer",
-		"generative ai engineer", "genai engineer",
+		"ai engineer", "artificial intelligence engineer", "applied ai engineer", "applied ai",
+		"llm engineer", "generative ai engineer", "genai engineer",
 	}
 	mlRolePhrases = []string{
 		"machine learning engineer", "ml engineer", "nlp engineer", "computer vision engineer",
-		"deep learning engineer", "ml scientist",
+		"cv engineer", "deep learning engineer", "ml scientist",
 	}
 	intentNoiseTokens = map[string]struct{}{
 		"ai": {}, "applied": {}, "computer": {}, "engineer": {}, "engineering": {}, "job": {}, "jobs": {},
@@ -237,9 +255,10 @@ func buildSearchQueries(query string, remoteOnly bool) []string {
 	}
 
 	queries := []string{
-		strings.TrimSpace(`site:linkedin.com/jobs ("AI Engineer" OR "Machine Learning Engineer" OR "ML Engineer" OR "LLM Engineer" OR "NLP Engineer" OR "Computer Vision Engineer")` + remoteSuffix + " " + tail),
-		strings.TrimSpace(`site:linkedin.com/jobs ("Applied AI Engineer" OR "Generative AI Engineer" OR "Machine Learning Engineer")` + remoteSuffix + " " + tail),
-		strings.TrimSpace(`site:linkedin.com/jobs ("AI Engineer" OR "ML Engineer" OR "LLM Engineer" OR "NLP Engineer" OR "Computer Vision Engineer")` + remoteSuffix + " " + tail),
+		strings.TrimSpace(`site:linkedin.com/jobs ("AI Engineer" OR "Applied AI Engineer" OR "Artificial Intelligence Engineer")` + remoteSuffix + " " + tail),
+		strings.TrimSpace(`site:linkedin.com/jobs ("Machine Learning Engineer" OR "ML Engineer" OR "MLOps Engineer" OR "Deep Learning Engineer")` + remoteSuffix + " " + tail),
+		strings.TrimSpace(`site:linkedin.com/jobs ("LLM Engineer" OR "Generative AI Engineer" OR "GenAI Engineer")` + remoteSuffix + " " + tail),
+		strings.TrimSpace(`site:linkedin.com/jobs ("NLP Engineer" OR "Computer Vision Engineer" OR "CV Engineer")` + remoteSuffix + " " + tail),
 	}
 	return dedupeStrings(queries)
 }
@@ -350,6 +369,26 @@ func hasAnyPhrase(normalizedText string, phrases ...string) bool {
 		}
 	}
 	return false
+}
+
+func matchesHardAITitle(title string) bool {
+	titleNorm := normalizeComparableText(title)
+	if titleNorm == "" {
+		return false
+	}
+	if hasAnyPhrase(titleNorm, hardTitlePhrases...) {
+		return true
+	}
+	return hasAnyPhrase(titleNorm, "ai", "ml", "llm", "nlp") &&
+		hasAnyPhrase(titleNorm, "engineer", "developer", "scientist", "researcher")
+}
+
+func hasExplicitNonAITitle(title string) bool {
+	titleNorm := normalizeComparableText(title)
+	if titleNorm == "" {
+		return false
+	}
+	return hasAnyPhrase(titleNorm, explicitNonAITitlePhrases...)
 }
 
 func canonicalizeURL(raw string) string {

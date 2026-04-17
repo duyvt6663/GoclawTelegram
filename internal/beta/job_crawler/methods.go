@@ -13,6 +13,7 @@ import (
 func registerMethods(feature *JobCrawlerFeature, router *gateway.MethodRouter) {
 	router.Register("beta.job_crawler.list", feature.handleListMethod)
 	router.Register("beta.job_crawler.get", feature.handleGetMethod)
+	router.Register("beta.job_crawler.traces", feature.handleTracesMethod)
 	router.Register("beta.job_crawler.upsert", feature.handleUpsertMethod)
 	router.Register("beta.job_crawler.run", feature.handleRunMethod)
 	router.Register("beta.job_crawler.run_dynamic", feature.handleRunDynamicMethod)
@@ -70,6 +71,30 @@ func (f *JobCrawlerFeature) handleGetMethod(ctx context.Context, client *gateway
 		return
 	}
 	client.SendResponse(protocol.NewOKResponse(req.ID, status))
+}
+
+func (f *JobCrawlerFeature) handleTracesMethod(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
+	var params traceParams
+	if req.Params != nil {
+		_ = json.Unmarshal(req.Params, &params)
+	}
+	result, err := f.traceResultForRequest(
+		tenantKeyFromCtx(ctx),
+		params.Key,
+		params.RunID,
+		params.Channel,
+		params.ChatID,
+		params.threadID(),
+	)
+	if err != nil {
+		code := protocol.ErrInvalidRequest
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			code = protocol.ErrNotFound
+		}
+		client.SendResponse(protocol.NewErrorResponse(req.ID, code, err.Error()))
+		return
+	}
+	client.SendResponse(protocol.NewOKResponse(req.ID, result))
 }
 
 func (f *JobCrawlerFeature) handleUpsertMethod(ctx context.Context, client *gateway.Client, req *protocol.RequestFrame) {
@@ -231,7 +256,22 @@ type dynamicRunParams struct {
 	Limit    int    `json:"limit"`
 }
 
+type traceParams struct {
+	Key      string `json:"key"`
+	RunID    string `json:"run_id"`
+	Channel  string `json:"channel"`
+	ChatID   string `json:"chat_id"`
+	ThreadID *int   `json:"thread_id,omitempty"`
+}
+
 func (p runParams) threadID() int {
+	if p.ThreadID == nil {
+		return 0
+	}
+	return *p.ThreadID
+}
+
+func (p traceParams) threadID() int {
 	if p.ThreadID == nil {
 		return 0
 	}

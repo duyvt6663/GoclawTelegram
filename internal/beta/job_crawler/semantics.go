@@ -1053,6 +1053,16 @@ func computeLocationWeight(cfg *JobCrawlerConfig, location normalizedLocation) f
 	return clamp(locationScore(cfg, location)*0.12, 0, 0.22)
 }
 
+func computeSourceBoost(cfg *JobCrawlerConfig, sourceID string) float64 {
+	if cfg == nil || !cfg.EnableLinkedInProxySource {
+		return 0
+	}
+	if strings.TrimSpace(strings.ToLower(sourceID)) == sourceLinkedInProxy {
+		return 0.12
+	}
+	return 0
+}
+
 func computeRecencyWeight(now time.Time, postedAt *time.Time) float64 {
 	return clamp(recencyScore(now, postedAt)*0.08, 0, 0.14)
 }
@@ -1080,9 +1090,9 @@ func unionKeywordMatches(groups ...[]string) []string {
 	return trimKeywordList(combined, 12)
 }
 
-func (f *JobCrawlerFeature) maybeRerankJobs(ctx context.Context, cfg *JobCrawlerConfig, jobs []RankedJob, profileText string, dynamic *DynamicRankingConfig) ([]RankedJob, []string) {
+func (f *JobCrawlerFeature) maybeRerankJobs(ctx context.Context, cfg *JobCrawlerConfig, jobs []RankedJob, profileText string, dynamic *DynamicRankingConfig) ([]RankedJob, []string, bool) {
 	if f == nil || cfg == nil || !cfg.EnableLLMRerank || len(jobs) < 2 {
-		return jobs, nil
+		return jobs, nil, false
 	}
 
 	limit := resolveLLMRerankTopN(cfg)
@@ -1090,7 +1100,7 @@ func (f *JobCrawlerFeature) maybeRerankJobs(ctx context.Context, cfg *JobCrawler
 		limit = len(jobs)
 	}
 	if limit < 2 {
-		return jobs, nil
+		return jobs, nil, false
 	}
 
 	payload := struct {
@@ -1119,31 +1129,72 @@ func (f *JobCrawlerFeature) maybeRerankJobs(ctx context.Context, cfg *JobCrawler
 	}
 	payloadJSON, _ := json.Marshal(payload)
 
-	rerankCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
-	defer cancel()
+	order, err := f.requestRerankOrder(ctx, cfg.TenantID, string(payloadJSON))
+	if err != nil {
+		return fallbackRerankJobs(jobs, limit), []string{"LLM rerank fallback: " + err.Error()}, true
+	}
 
-	rawResponse, err := f.callDynamicLLM(rerankCtx, cfg.TenantID, `You rerank engineering jobs for a targeted crawler digest.
+	return applyRerankOrder(jobs, order, limit), nil, false
+}
+
+func (f *JobCrawlerFeature) requestRerankOrder(ctx context.Context, tenantID, payload string) (map[string]int, error) {
+	prompts := []string{
+		`You rerank engineering jobs for a targeted crawler digest.
 Return strict JSON:
 {"ordered_job_hashes":["hash1","hash2"]}
 
 Rules:
 - ordered_job_hashes must only contain hashes from the input jobs
 - rank the best matches first for the provided profile/query
-- do not explain the output`, string(payloadJSON), 320)
-	if err != nil {
-		return jobs, []string{"LLM rerank skipped: " + err.Error()}
+- do not explain the output`,
+		`Return JSON only:
+{"ordered_job_hashes":["hash1","hash2"]}
+
+Rules:
+- use only job_hash values from the input
+- include at least 2 hashes when possible
+- no markdown
+- no explanation`,
 	}
 
-	orderPayload := extractJSONBlock(rawResponse, '{', '}')
+	var attemptErrors []string
+	for _, prompt := range prompts {
+		rerankCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+		rawResponse, err := f.callDynamicLLM(rerankCtx, tenantID, prompt, payload, 320)
+		cancel()
+		if err != nil {
+			attemptErrors = append(attemptErrors, err.Error())
+			continue
+		}
+		order, err := decodeRerankOrder(rawResponse)
+		if err != nil {
+			attemptErrors = append(attemptErrors, err.Error())
+			continue
+		}
+		if len(order) == 0 {
+			attemptErrors = append(attemptErrors, "no valid job hashes returned")
+			continue
+		}
+		return order, nil
+	}
+
+	if len(attemptErrors) == 0 {
+		return nil, fmt.Errorf("rerank order unavailable")
+	}
+	return nil, fmt.Errorf("%s", strings.Join(attemptErrors, "; "))
+}
+
+func decodeRerankOrder(raw string) (map[string]int, error) {
+	orderPayload := extractJSONBlock(raw, '{', '}')
 	if orderPayload == "" {
-		return jobs, []string{"LLM rerank skipped: invalid JSON response"}
+		return nil, fmt.Errorf("invalid JSON response")
 	}
 
 	var decoded struct {
 		OrderedJobHashes []string `json:"ordered_job_hashes"`
 	}
 	if err := json.Unmarshal([]byte(orderPayload), &decoded); err != nil {
-		return jobs, []string{"LLM rerank skipped: " + err.Error()}
+		return nil, err
 	}
 
 	order := make(map[string]int, len(decoded.OrderedJobHashes))
@@ -1157,10 +1208,16 @@ Rules:
 		}
 		order[jobHash] = idx
 	}
-	if len(order) == 0 {
-		return jobs, []string{"LLM rerank skipped: no valid job hashes returned"}
-	}
+	return order, nil
+}
 
+func applyRerankOrder(jobs []RankedJob, order map[string]int, limit int) []RankedJob {
+	if len(jobs) == 0 || len(order) == 0 {
+		return append([]RankedJob(nil), jobs...)
+	}
+	if limit <= 0 || limit > len(jobs) {
+		limit = len(jobs)
+	}
 	reranked := append([]RankedJob(nil), jobs...)
 	sort.SliceStable(reranked[:limit], func(i, j int) bool {
 		leftRank, leftOK := order[reranked[i].JobHash]
@@ -1173,8 +1230,31 @@ Rules:
 		case rightOK:
 			return false
 		default:
-			return reranked[i].Score > reranked[j].Score
+			return betterRankedJob(reranked[i], reranked[j])
 		}
 	})
-	return reranked, nil
+	return reranked
+}
+
+func fallbackRerankJobs(jobs []RankedJob, limit int) []RankedJob {
+	if len(jobs) == 0 {
+		return nil
+	}
+	if limit <= 0 || limit > len(jobs) {
+		limit = len(jobs)
+	}
+	reranked := append([]RankedJob(nil), jobs...)
+	sort.SliceStable(reranked[:limit], func(i, j int) bool {
+		switch {
+		case reranked[i].SourceBoost != reranked[j].SourceBoost:
+			return reranked[i].SourceBoost > reranked[j].SourceBoost
+		case reranked[i].SemanticScore != reranked[j].SemanticScore:
+			return reranked[i].SemanticScore > reranked[j].SemanticScore
+		case reranked[i].RoleMatch != reranked[j].RoleMatch:
+			return reranked[i].RoleMatch > reranked[j].RoleMatch
+		default:
+			return betterRankedJob(reranked[i], reranked[j])
+		}
+	})
+	return reranked
 }

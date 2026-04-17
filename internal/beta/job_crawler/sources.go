@@ -42,6 +42,7 @@ type JobListing struct {
 type RankedJob struct {
 	JobListing
 	JobHash            string     `json:"job_hash"`
+	SourceBoost        float64    `json:"source_boost,omitempty"`
 	Score              float64    `json:"score"`
 	SemanticScore      float64    `json:"semantic_score"`
 	KeywordScore       float64    `json:"keyword_score"`
@@ -61,6 +62,7 @@ type RankedJob struct {
 	LastPostedAt       *time.Time `json:"last_posted_at,omitempty"`
 	NormalizedTitle    string     `json:"-"`
 	ContentTokens      []string   `json:"-"`
+	TraceID            string     `json:"-"`
 }
 
 type cachedSourceResult struct {
@@ -143,7 +145,7 @@ func (f *JobCrawlerFeature) fetchLinkedInProxyJobs(ctx context.Context, cfg *Job
 	payload, err := f.linkedinProxy.Search(ctx, cfg.TenantID, linkedinjobsproxy.SearchRequest{
 		Query:           buildLinkedInProxyIntent(cfg),
 		MaxResults:      resolveLinkedInProxyMaxResults(cfg),
-		TopNPerQuery:    8,
+		TopNPerQuery:    12,
 		HardTitleFilter: cfg.HardTitleFilter,
 		RemoteOnly:      cfg.RemoteOnly || cfg.LocationMode == locationModeRemoteGlobal || cfg.LocationMode == locationModeHybrid,
 	})

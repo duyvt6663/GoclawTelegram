@@ -248,14 +248,16 @@ func mergePreview(item rawSearchCandidate, preview previewMetadata) JobPreview {
 
 func passesFilters(job JobPreview, hardTitleFilter bool) bool {
 	titleNorm := normalizeComparableText(job.Title)
-	bodyNorm := normalizeComparableText(strings.Join([]string{job.Snippet, job.Description, job.Location}, " "))
-	if hardTitleFilter && !hasAnyPhrase(titleNorm, hardTitlePhrases...) {
+	if hardTitleFilter && !matchesHardAITitle(job.Title) {
+		return false
+	}
+	if hasExplicitNonAITitle(job.Title) {
 		return false
 	}
 	if classifyRole(job.Title, job.Snippet+" "+job.Description) == "" {
 		return false
 	}
-	if hasAnyPhrase(titleNorm, excludedPhrases...) || hasAnyPhrase(bodyNorm, excludedPhrases...) {
+	if hasAnyPhrase(titleNorm, excludedPhrases...) {
 		return false
 	}
 	return cleanText(job.Title) != "" && cleanText(job.Company) != ""
@@ -265,13 +267,20 @@ func classifyRole(title, snippet string) string {
 	titleNorm := normalizeComparableText(title)
 	bodyNorm := normalizeComparableText(snippet)
 	switch {
-	case hasAnyPhrase(titleNorm, aiRolePhrases...) || hasAnyPhrase(bodyNorm, aiRolePhrases...):
+	case hasExplicitNonAITitle(title):
+		return ""
+	case hasAnyPhrase(titleNorm, aiRolePhrases...):
 		return "ai_engineer"
-	case hasAnyPhrase(titleNorm, mlRolePhrases...) || hasAnyPhrase(bodyNorm, mlRolePhrases...):
+	case hasAnyPhrase(titleNorm, mlRolePhrases...):
 		return "ml_engineer"
-	case hasAnyPhrase(titleNorm, "ai", "llm") && hasAnyPhrase(titleNorm, "engineer"):
+	case matchesHardAITitle(title) && hasAnyPhrase(titleNorm, "engineer", "developer", "scientist", "researcher"):
+		if hasAnyPhrase(titleNorm, "machine learning", "ml", "nlp", "natural language processing", "computer vision", "cv engineer", "deep learning") {
+			return "ml_engineer"
+		}
 		return "ai_engineer"
-	case hasAnyPhrase(titleNorm, "machine learning", "ml", "nlp", "computer vision") && hasAnyPhrase(titleNorm, "engineer"):
+	case hasAnyPhrase(bodyNorm, aiRolePhrases...):
+		return "ai_engineer"
+	case hasAnyPhrase(bodyNorm, mlRolePhrases...):
 		return "ml_engineer"
 	default:
 		return ""
@@ -425,11 +434,13 @@ func extractPreviewFromHTML(body []byte) previewMetadata {
 		if payload == nil {
 			continue
 		}
-		if preview.Title == "" {
-			preview.Title = cleanText(asString(payload["title"]))
+		jobTitle := cleanupLinkedInTitle(cleanText(asString(payload["title"])))
+		if shouldPreferJobPostingTitle(preview.Title, jobTitle) {
+			preview.Title = jobTitle
 		}
-		if preview.Description == "" {
-			preview.Description = trimRunes(htmlToText(asString(payload["description"])), 1400)
+		jobDescription := trimRunes(htmlToText(asString(payload["description"])), 1400)
+		if shouldPreferJobPostingDescription(preview.Description, jobDescription) {
+			preview.Description = jobDescription
 		}
 		if org, ok := payload["hiringOrganization"].(map[string]any); ok && preview.Company == "" {
 			preview.Company = cleanText(asString(org["name"]))
@@ -451,6 +462,9 @@ func extractPreviewFromHTML(body []byte) previewMetadata {
 	if preview.Description != "" {
 		preview.Description = trimRunes(cleanText(preview.Description), 1400)
 	}
+	if preview.Snippet == "" && preview.Description != "" {
+		preview.Snippet = trimRunes(preview.Description, 480)
+	}
 	return preview
 }
 
@@ -460,6 +474,38 @@ func cleanupLinkedInTitle(value string) string {
 		value = strings.TrimSuffix(value, suffix)
 	}
 	return cleanText(value)
+}
+
+func shouldPreferJobPostingTitle(current, candidate string) bool {
+	current = cleanupLinkedInTitle(current)
+	candidate = cleanupLinkedInTitle(candidate)
+	switch {
+	case candidate == "":
+		return false
+	case current == "":
+		return true
+	case strings.EqualFold(current, candidate):
+		return false
+	case strings.Contains(strings.ToLower(current), "linkedin"):
+		return true
+	default:
+		return len(candidate) < len(current)
+	}
+}
+
+func shouldPreferJobPostingDescription(current, candidate string) bool {
+	current = cleanText(current)
+	candidate = cleanText(candidate)
+	switch {
+	case candidate == "":
+		return false
+	case current == "":
+		return true
+	case len(current) < 100 && len(candidate) > len(current)+24:
+		return true
+	default:
+		return false
+	}
 }
 
 func findJobPostingPayload(value any) map[string]any {
