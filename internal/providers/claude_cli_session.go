@@ -14,28 +14,66 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/config"
 )
 
-// validCLIModels lists accepted model aliases for the Claude CLI.
-var validCLIModels = map[string]bool{
+// validClaudeCLIAliases lists accepted short aliases for the Claude CLI.
+var validClaudeCLIAliases = map[string]bool{
 	"sonnet": true, "opus": true, "haiku": true,
 }
 
-// validateCLIModel checks if a model alias is supported by the Claude CLI.
+// validateCLIModel checks if a model name is acceptable for the Claude CLI.
+// The CLI accepts either aliases ("opus") or full model IDs ("claude-opus-4-7").
 func validateCLIModel(model string) error {
-	if !validCLIModels[model] {
-		return fmt.Errorf("claude-cli: unsupported model %q (valid: sonnet, opus, haiku)", model)
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return fmt.Errorf("claude-cli: model is required")
 	}
-	return nil
+	if strings.ContainsAny(model, "\r\n\t") {
+		return fmt.Errorf("claude-cli: invalid model %q", model)
+	}
+	if validClaudeCLIAliases[model] {
+		return nil
+	}
+	if strings.HasPrefix(model, "claude-") {
+		return nil
+	}
+	return fmt.Errorf("claude-cli: unsupported model %q (valid aliases: sonnet, opus, haiku; full IDs like claude-opus-4-7 are also allowed)", model)
+}
+
+func normalizeClaudeCLIEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low", "medium", "high", "xhigh", "max":
+		return strings.ToLower(strings.TrimSpace(effort))
+	default:
+		return ""
+	}
+}
+
+func resolveClaudeCLIEffort(opts map[string]any, defaultEffort string) string {
+	if effort := normalizeClaudeCLIEffort(extractStringOpt(opts, OptThinkingLevel)); effort != "" {
+		return effort
+	}
+	return normalizeClaudeCLIEffort(defaultEffort)
 }
 
 // buildArgs constructs CLI arguments.
 // mcpConfigPath is the resolved per-session MCP config file (may differ per call).
-func (p *ClaudeCLIProvider) buildArgs(model, workDir, mcpConfigPath string, cliSessionID uuid.UUID, outputFormat string, hasImages, disableTools bool) []string {
+func (p *ClaudeCLIProvider) buildArgs(model, effort, workDir, mcpConfigPath, systemPrompt string, cliSessionID uuid.UUID, outputFormat string, hasImages, disableTools bool) []string {
 	args := []string{
 		"-p",
 		"--output-format", outputFormat,
 		"--model", model,
 		"--permission-mode", p.permMode,
 		"--verbose",
+	}
+	if effort != "" {
+		args = append(args, "--effort", effort)
+	}
+	if strings.TrimSpace(systemPrompt) != "" {
+		args = append(args, "--append-system-prompt", systemPrompt)
+	}
+	for _, dir := range p.addDirs {
+		if dir != "" {
+			args = append(args, "--add-dir", dir)
+		}
 	}
 
 	if mcpConfigPath != "" {
@@ -84,8 +122,29 @@ func (p *ClaudeCLIProvider) resolveMCPConfigPath(ctx context.Context, sessionKey
 	return path
 }
 
-// ensureWorkDir creates and returns a stable work directory for the given session key.
-func (p *ClaudeCLIProvider) ensureWorkDir(sessionKey string) string {
+func (p *ClaudeCLIProvider) resolveWorkDir(opts map[string]any, sessionKey string) string {
+	if workspace := normalizeClaudeCLIWorkspace(extractStringOpt(opts, OptWorkspace)); workspace != "" {
+		return workspace
+	}
+	return p.ensureSessionWorkDir(sessionKey)
+}
+
+func normalizeClaudeCLIWorkspace(workspace string) string {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" || strings.ContainsAny(workspace, "\r\n\x00") {
+		return ""
+	}
+	workspace = filepath.Clean(workspace)
+	if !filepath.IsAbs(workspace) {
+		if abs, err := filepath.Abs(workspace); err == nil {
+			workspace = abs
+		}
+	}
+	return workspace
+}
+
+// ensureSessionWorkDir creates and returns a stable fallback work directory for the given session key.
+func (p *ClaudeCLIProvider) ensureSessionWorkDir(sessionKey string) string {
 	// Sanitize session key for filesystem safety (path traversal, null bytes, length)
 	safe := sanitizePathSegment(sessionKey)
 	dir := filepath.Join(p.baseWorkDir, safe)
@@ -98,19 +157,6 @@ func (p *ClaudeCLIProvider) ensureWorkDir(sessionKey string) string {
 		return os.TempDir()
 	}
 	return dir
-}
-
-// writeClaudeMD writes the system prompt to CLAUDE.md in the work directory.
-// CLI reads this file automatically on every run (including --resume).
-// Skips write if content is unchanged to avoid unnecessary disk I/O.
-func (p *ClaudeCLIProvider) writeClaudeMD(workDir, systemPrompt string) {
-	path := filepath.Join(workDir, "CLAUDE.md")
-	if existing, err := os.ReadFile(path); err == nil && string(existing) == systemPrompt {
-		return
-	}
-	if err := os.WriteFile(path, []byte(systemPrompt), 0600); err != nil {
-		slog.Warn("claude-cli: failed to write CLAUDE.md", "path", path, "error", err)
-	}
 }
 
 // extractFromMessages extracts system prompt, last user message, and images from the messages array.

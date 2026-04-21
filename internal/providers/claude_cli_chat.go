@@ -29,15 +29,13 @@ func (p *ClaudeCLIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatRes
 	unlock := p.lockSession(sessionKey)
 	defer unlock()
 
-	workDir := p.ensureWorkDir(sessionKey)
-	if systemPrompt != "" {
-		p.writeClaudeMD(workDir, systemPrompt)
-	}
+	workDir := p.resolveWorkDir(req.Options, sessionKey)
 
 	cliSessionID := deriveSessionUUID(sessionKey)
 	disableTools := extractBoolOpt(req.Options, OptDisableTools)
 	bc := bridgeContextFromOpts(req.Options)
 	mcpPath := p.resolveMCPConfigPath(ctx, sessionKey, bc)
+	effort := resolveClaudeCLIEffort(req.Options, p.defaultEffort)
 	// Claude CLI >= v2.1.87 requires matching input/output formats.
 	// When images are present, buildArgs adds --input-format stream-json,
 	// so output format must also be stream-json.
@@ -45,7 +43,7 @@ func (p *ClaudeCLIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatRes
 	if len(images) > 0 {
 		outputFmt = "stream-json"
 	}
-	args := p.buildArgs(model, workDir, mcpPath, cliSessionID, outputFmt, len(images) > 0, disableTools)
+	args := p.buildArgs(model, effort, workDir, mcpPath, systemPrompt, cliSessionID, outputFmt, len(images) > 0, disableTools)
 
 	var stdin *bytes.Reader
 	if len(images) > 0 {
@@ -93,16 +91,14 @@ func (p *ClaudeCLIProvider) ChatStream(ctx context.Context, req ChatRequest, onC
 		slog.Debug("claude-cli: session lock released", "session_key", sessionKey)
 	}()
 
-	workDir := p.ensureWorkDir(sessionKey)
-	if systemPrompt != "" {
-		p.writeClaudeMD(workDir, systemPrompt)
-	}
+	workDir := p.resolveWorkDir(req.Options, sessionKey)
 
 	cliSessionID := deriveSessionUUID(sessionKey)
 	disableTools := extractBoolOpt(req.Options, OptDisableTools)
 	bc := bridgeContextFromOpts(req.Options)
 	mcpPath := p.resolveMCPConfigPath(ctx, sessionKey, bc)
-	args := p.buildArgs(model, workDir, mcpPath, cliSessionID, "stream-json", len(images) > 0, disableTools)
+	effort := resolveClaudeCLIEffort(req.Options, p.defaultEffort)
+	args := p.buildArgs(model, effort, workDir, mcpPath, systemPrompt, cliSessionID, "stream-json", len(images) > 0, disableTools)
 
 	var stdin *bytes.Reader
 	if len(images) > 0 {

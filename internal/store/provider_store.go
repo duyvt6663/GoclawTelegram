@@ -24,6 +24,7 @@ const (
 	ProviderBailian         = "bailian"
 	ProviderChatGPTOAuth    = "chatgpt_oauth"
 	ProviderClaudeCLI       = "claude_cli"
+	ProviderCodexCLI        = "codex_cli"
 	ProviderSuno            = "suno"
 	ProviderYesScale        = "yescale"
 	ProviderZai             = "zai"
@@ -55,6 +56,7 @@ var ValidProviderTypes = map[string]bool{
 	ProviderBailian:         true,
 	ProviderChatGPTOAuth:    true,
 	ProviderClaudeCLI:       true,
+	ProviderCodexCLI:        true,
 	ProviderSuno:            true,
 	ProviderYesScale:        true,
 	ProviderZai:             true,
@@ -171,6 +173,7 @@ var NoEmbeddingTypes = map[string]bool{
 	ProviderAnthropicNative: true, // uses x-api-key auth, not Bearer; no embedding models
 	ProviderACP:             true,
 	ProviderClaudeCLI:       true,
+	ProviderCodexCLI:        true,
 	ProviderChatGPTOAuth:    true,
 	ProviderSuno:            true,
 }

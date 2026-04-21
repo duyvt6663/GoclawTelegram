@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -150,6 +151,7 @@ func registerProviders(registry *providers.Registry, cfg *config.Config) {
 	if cfg.Providers.ClaudeCLI.CLIPath != "" {
 		cliPath := cfg.Providers.ClaudeCLI.CLIPath
 		var opts []providers.ClaudeCLIOption
+		opts = append(opts, providers.WithClaudeCLIName("claude-cli"))
 		if cfg.Providers.ClaudeCLI.Model != "" {
 			opts = append(opts, providers.WithClaudeCLIModel(cfg.Providers.ClaudeCLI.Model))
 		}
@@ -213,6 +215,46 @@ func buildMCPServerLookup(mcpStore store.MCPServerStore) providers.MCPServerLook
 	}
 }
 
+type claudeCLIProviderSettings struct {
+	Model         string   `json:"model,omitempty"`
+	Effort        string   `json:"effort,omitempty"`
+	BaseWorkDir   string   `json:"base_work_dir,omitempty"`
+	WorkspaceRoot string   `json:"workspace_root,omitempty"`
+	PermMode      string   `json:"perm_mode,omitempty"`
+	AddDirs       []string `json:"add_dirs,omitempty"`
+	UseMCPBridge  *bool    `json:"use_mcp_bridge,omitempty"`
+}
+
+func parseClaudeCLIProviderSettings(data json.RawMessage) claudeCLIProviderSettings {
+	var settings claudeCLIProviderSettings
+	if len(data) == 0 {
+		return settings
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		slog.Warn("claude-cli: invalid settings JSON, using defaults", "error", err)
+	}
+	return settings
+}
+
+type codexCLIProviderSettings struct {
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	WorkDir         string `json:"work_dir,omitempty"`
+	SandboxMode     string `json:"sandbox_mode,omitempty"`
+	ApprovalPolicy  string `json:"approval_policy,omitempty"`
+}
+
+func parseCodexCLIProviderSettings(data json.RawMessage) codexCLIProviderSettings {
+	var settings codexCLIProviderSettings
+	if len(data) == 0 {
+		return settings
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		slog.Warn("codex-cli: invalid settings JSON, using defaults", "error", err)
+	}
+	return settings
+}
+
 // jsonToStringSlice converts a json.RawMessage to []string.
 func jsonToStringSlice(data json.RawMessage) []string {
 	if len(data) == 0 {
@@ -267,14 +309,83 @@ func registerProvidersFromDB(registry *providers.Registry, provStore store.Provi
 				slog.Warn("claude-cli: binary not found, skipping", "path", cliPath, "error", err)
 				continue
 			}
+			settings := parseClaudeCLIProviderSettings(p.Settings)
 			var cliOpts []providers.ClaudeCLIOption
-			cliOpts = append(cliOpts, providers.WithClaudeCLISecurityHooks("", true))
-			if gatewayAddr != "" {
+			cliOpts = append(cliOpts, providers.WithClaudeCLIName(p.Name))
+			if settings.Model != "" {
+				cliOpts = append(cliOpts, providers.WithClaudeCLIModel(settings.Model))
+			}
+			if settings.Effort != "" {
+				cliOpts = append(cliOpts, providers.WithClaudeCLIEffort(settings.Effort))
+			}
+			if settings.BaseWorkDir != "" {
+				cliOpts = append(cliOpts, providers.WithClaudeCLIWorkDir(settings.BaseWorkDir))
+			}
+			if settings.PermMode != "" {
+				cliOpts = append(cliOpts, providers.WithClaudeCLIPermMode(settings.PermMode))
+			}
+			var addDirs []string
+			for _, dir := range settings.AddDirs {
+				dir = strings.TrimSpace(dir)
+				if dir == "" {
+					continue
+				}
+				if !filepath.IsAbs(dir) {
+					slog.Warn("security.claude_cli: skipping non-absolute add_dir from DB", "dir", dir, "provider", p.Name)
+					continue
+				}
+				addDirs = append(addDirs, dir)
+			}
+			if len(addDirs) > 0 {
+				cliOpts = append(cliOpts, providers.WithClaudeCLIAddDirs(addDirs...))
+			}
+			workspaceRoot := settings.WorkspaceRoot
+			if workspaceRoot == "" {
+				workspaceRoot = settings.BaseWorkDir
+			}
+			cliOpts = append(cliOpts, providers.WithClaudeCLISecurityHooks(workspaceRoot, true, addDirs...))
+			useMCPBridge := settings.UseMCPBridge == nil || *settings.UseMCPBridge
+			if useMCPBridge && gatewayAddr != "" {
 				mcpData := providers.BuildCLIMCPConfigData(nil, gatewayAddr, gatewayToken)
 				mcpData.AgentMCPLookup = buildMCPServerLookup(mcpStore)
 				cliOpts = append(cliOpts, providers.WithClaudeCLIMCPConfigData(mcpData))
 			}
 			registry.RegisterForTenant(p.TenantID, providers.NewClaudeCLIProvider(cliPath, cliOpts...))
+			slog.Info("registered provider from DB", "name", p.Name)
+			continue
+		}
+		if p.ProviderType == store.ProviderCodexCLI {
+			cliPath := p.APIBase // reuse APIBase field for CLI path
+			if cliPath == "" {
+				cliPath = "codex"
+			}
+			if cliPath != "codex" && !filepath.IsAbs(cliPath) {
+				slog.Warn("security.codex_cli: invalid path from DB, using default", "path", cliPath)
+				cliPath = "codex"
+			}
+			if _, err := exec.LookPath(cliPath); err != nil {
+				slog.Warn("codex-cli: binary not found, skipping", "path", cliPath, "error", err)
+				continue
+			}
+			settings := parseCodexCLIProviderSettings(p.Settings)
+			var cliOpts []providers.CodexCLIOption
+			cliOpts = append(cliOpts, providers.WithCodexCLIName(p.Name))
+			if settings.Model != "" {
+				cliOpts = append(cliOpts, providers.WithCodexCLIModel(settings.Model))
+			}
+			if settings.ReasoningEffort != "" {
+				cliOpts = append(cliOpts, providers.WithCodexCLIReasoningEffort(settings.ReasoningEffort))
+			}
+			if settings.WorkDir != "" {
+				cliOpts = append(cliOpts, providers.WithCodexCLIWorkDir(settings.WorkDir))
+			}
+			if settings.SandboxMode != "" {
+				cliOpts = append(cliOpts, providers.WithCodexCLISandboxMode(settings.SandboxMode))
+			}
+			if settings.ApprovalPolicy != "" {
+				cliOpts = append(cliOpts, providers.WithCodexCLIApprovalPolicy(settings.ApprovalPolicy))
+			}
+			registry.RegisterForTenant(p.TenantID, providers.NewCodexCLIProvider(cliPath, cliOpts...))
 			slog.Info("registered provider from DB", "name", p.Name)
 			continue
 		}

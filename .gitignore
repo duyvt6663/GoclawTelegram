@@ -50,6 +50,7 @@ goclaw-lite-*.zip
 .mcp.json
 tmp
 .claude/
+.codex/
 
 deploy-*.sh
 
@@ -92,3 +93,5 @@ compose.d/*
 .local-stickers/
 */__pycache__/
 builder-bot/*
+
+graphify-out/*

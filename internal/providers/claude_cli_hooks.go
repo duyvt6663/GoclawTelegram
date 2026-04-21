@@ -12,8 +12,10 @@ import (
 
 // BuildCLIHooksConfig generates a Claude CLI settings file with PreToolUse hooks
 // that enforce GoClaw's security policies (shell deny patterns, path restrictions).
+// Read may optionally be allowed from extraReadDirs, while Edit/Write remain pinned
+// to workspace when restrictToWorkspace is true.
 // Returns settings file path and a cleanup function.
-func BuildCLIHooksConfig(workspace string, restrictToWorkspace bool) (string, func(), error) {
+func BuildCLIHooksConfig(workspace string, restrictToWorkspace bool, extraReadDirs ...string) (string, func(), error) {
 	tmpDir := filepath.Join(os.TempDir(), "goclaw-cli-hooks")
 	if err := os.MkdirAll(tmpDir, 0755); err != nil {
 		return "", nil, fmt.Errorf("create hooks dir: %w", err)
@@ -22,7 +24,7 @@ func BuildCLIHooksConfig(workspace string, restrictToWorkspace bool) (string, fu
 	id := uuid.New().String()[:8]
 
 	// Write the hook script
-	hookScript := generateHookScript(workspace, restrictToWorkspace)
+	hookScript := generateHookScript(workspace, restrictToWorkspace, extraReadDirs...)
 	hookPath := filepath.Join(tmpDir, fmt.Sprintf("hook-%s.sh", id))
 	if err := os.WriteFile(hookPath, []byte(hookScript), 0755); err != nil {
 		return "", nil, fmt.Errorf("write hook script: %w", err)
@@ -82,8 +84,9 @@ func generateSettingsJSON(hookPath string) []byte {
 }
 
 // generateHookScript creates a bash script that enforces GoClaw security policies.
-func generateHookScript(workspace string, restrictToWorkspace bool) string {
+func generateHookScript(workspace string, restrictToWorkspace bool, extraReadDirs ...string) string {
 	var sb strings.Builder
+	readRestrictionEnabled := (restrictToWorkspace && workspace != "") || len(extraReadDirs) > 0
 
 	sb.WriteString(`#!/bin/bash
 set -euo pipefail
@@ -104,6 +107,12 @@ deny() {
   local reason="$1"
   echo "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$reason\"}}"
   exit 0
+}
+
+path_within_root() {
+  local resolved="$1"
+  local root="$2"
+  [[ "$resolved" == "$root" || "$resolved" == "$root"/* ]]
 }
 
 `)
@@ -139,17 +148,58 @@ check_shell_deny() {
 		fmt.Fprintf(&sb, `# === Workspace path restriction ===
 WORKSPACE='%s'
 
-check_path_restriction() {
+check_write_path_restriction() {
   local file_path="$1"
   # Resolve all paths (including relative) to absolute for proper checking
   local resolved
   resolved=$(realpath -m "$file_path" 2>/dev/null || echo "$file_path")
-  if [[ "$resolved" != "$WORKSPACE"* ]]; then
+  if ! path_within_root "$resolved" "$WORKSPACE"; then
     deny "security: path outside workspace boundary"
   fi
 }
 
 `, safeWorkspace)
+	}
+
+	if len(extraReadDirs) > 0 {
+		sb.WriteString("# === Extra read-only directories ===\nREAD_DIRS=(\n")
+		for _, dir := range extraReadDirs {
+			dir = filepath.Clean(strings.TrimSpace(dir))
+			if dir == "" {
+				continue
+			}
+			safeDir := strings.ReplaceAll(dir, `'`, `'\''`)
+			fmt.Fprintf(&sb, "  '%s'\n", safeDir)
+		}
+		sb.WriteString(")\n\n")
+	} else {
+		sb.WriteString("# === Extra read-only directories ===\nREAD_DIRS=()\n\n")
+	}
+
+	if readRestrictionEnabled {
+		sb.WriteString(`# === Read path restriction ===
+check_read_path_restriction() {
+  local file_path="$1"
+  local resolved
+  resolved=$(realpath -m "$file_path" 2>/dev/null || echo "$file_path")
+`)
+
+		if restrictToWorkspace && workspace != "" {
+			sb.WriteString(`  if path_within_root "$resolved" "$WORKSPACE"; then
+    return 0
+  fi
+`)
+		}
+
+		sb.WriteString(`  for root in "${READ_DIRS[@]}"; do
+    if path_within_root "$resolved" "$root"; then
+      return 0
+    fi
+  done
+  deny "security: path outside allowed read roots"
+}
+
+`)
 	}
 
 	// Main dispatch
@@ -167,7 +217,7 @@ case "$TOOL_NAME" in
 
 	if restrictToWorkspace && workspace != "" {
 		sb.WriteString(`    if [ -n "$FILE_PATH" ]; then
-      check_path_restriction "$FILE_PATH"
+      check_write_path_restriction "$FILE_PATH"
     fi
 `)
 	}
@@ -179,7 +229,7 @@ case "$TOOL_NAME" in
 
 	if restrictToWorkspace && workspace != "" {
 		sb.WriteString(`    if [ -n "$FILE_PATH" ]; then
-      check_path_restriction "$FILE_PATH"
+      check_write_path_restriction "$FILE_PATH"
     fi
 `)
 	}
@@ -189,9 +239,9 @@ case "$TOOL_NAME" in
     FILE_PATH=$(echo "$TOOL_INPUT" | jq -r '.file_path // empty')
 `)
 
-	if restrictToWorkspace && workspace != "" {
+	if readRestrictionEnabled {
 		sb.WriteString(`    if [ -n "$FILE_PATH" ]; then
-      check_path_restriction "$FILE_PATH"
+      check_read_path_restriction "$FILE_PATH"
     fi
 `)
 	}

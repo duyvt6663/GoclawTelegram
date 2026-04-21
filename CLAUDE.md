@@ -140,3 +140,12 @@ When implementing or modifying web UI components, follow these rules to ensure m
 - **Timezone:** User timezone stored in Zustand (`useUiStore`). Charts use `formatBucketTz()` from `lib/format.ts` with native `Intl.DateTimeFormat` — no date-fns-tz dependency
 - **ErrorBoundary key:** `AppLayout` uses `<ErrorBoundary key={stableErrorBoundaryKey(pathname)}>` which strips dynamic segments (`/chat/session-A` → `/chat`). NEVER use `key={location.pathname}` on ErrorBoundary/Suspense wrapping `<Outlet>` — it causes full page remount on param changes. Pages with sub-navigation (chat sessions, detail pages) must share a stable key
 - **Route params as source of truth:** For pages with URL params (e.g. `/chat/:sessionKey`), derive state from `useParams()` — do NOT duplicate into `useState`. Dual state causes race conditions between `setState` and `navigate()` leading to UI flash (state bounces: B→A→B). Use optional params (`/chat/:sessionKey?`) instead of two separate routes
+
+## graphify
+
+This project has a graphify knowledge graph at graphify-out/.
+
+Rules:
+- Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
+- If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
+- After modifying code files in this session, run `graphify update .` to keep the graph current (AST-only, no API cost)

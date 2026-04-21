@@ -39,20 +39,32 @@ const OptTenantID = "tenant_id"
 // It acts as a thin proxy: CLI manages session history, tool execution, and context.
 // GoClaw only forwards the latest user message and streams back the response.
 type ClaudeCLIProvider struct {
-	cliPath            string // path to claude binary (default: "claude")
-	defaultModel       string // default: "sonnet"
-	baseWorkDir        string // base dir for agent workspaces
-	mcpConfigData      *MCPConfigData // per-session MCP config data
-	permMode           string // permission mode (default: "bypassPermissions")
-	hooksSettingsPath  string // generated settings.json with security hooks (empty = no hooks)
-	hooksCleanup       func() // cleanup function for hooks temp files
-	mu                 sync.Mutex // protects workdir creation
-	sessionMu          sync.Map   // key: string, value: *sync.Mutex — per-session lock
-	mcpConfigDirs      sync.Map   // key: string (dir path), value: struct{} — tracks per-session MCP config dirs for cleanup
+	name              string
+	cliPath           string         // path to claude binary (default: "claude")
+	defaultModel      string         // default: "sonnet"
+	defaultEffort     string         // default: provider/CLI default
+	baseWorkDir       string         // base dir for agent workspaces
+	addDirs           []string       // extra tool-access directories passed via --add-dir
+	mcpConfigData     *MCPConfigData // per-session MCP config data
+	permMode          string         // permission mode (default: "bypassPermissions")
+	hooksSettingsPath string         // generated settings.json with security hooks (empty = no hooks)
+	hooksCleanup      func()         // cleanup function for hooks temp files
+	mu                sync.Mutex     // protects workdir creation
+	sessionMu         sync.Map       // key: string, value: *sync.Mutex — per-session lock
+	mcpConfigDirs     sync.Map       // key: string (dir path), value: struct{} — tracks per-session MCP config dirs for cleanup
 }
 
 // ClaudeCLIOption configures the provider.
 type ClaudeCLIOption func(*ClaudeCLIProvider)
+
+// WithClaudeCLIName sets the provider registry name.
+func WithClaudeCLIName(name string) ClaudeCLIOption {
+	return func(p *ClaudeCLIProvider) {
+		if name != "" {
+			p.name = name
+		}
+	}
+}
 
 // WithClaudeCLIModel sets the default model alias.
 func WithClaudeCLIModel(model string) ClaudeCLIOption {
@@ -63,11 +75,33 @@ func WithClaudeCLIModel(model string) ClaudeCLIOption {
 	}
 }
 
+// WithClaudeCLIEffort sets the default reasoning effort passed to the CLI.
+func WithClaudeCLIEffort(effort string) ClaudeCLIOption {
+	return func(p *ClaudeCLIProvider) {
+		if effort := normalizeClaudeCLIEffort(effort); effort != "" {
+			p.defaultEffort = effort
+		}
+	}
+}
+
 // WithClaudeCLIWorkDir sets the base work directory.
 func WithClaudeCLIWorkDir(dir string) ClaudeCLIOption {
 	return func(p *ClaudeCLIProvider) {
 		if dir != "" {
 			p.baseWorkDir = dir
+		}
+	}
+}
+
+// WithClaudeCLIAddDirs adds extra directories Claude CLI may access via --add-dir.
+func WithClaudeCLIAddDirs(dirs ...string) ClaudeCLIOption {
+	return func(p *ClaudeCLIProvider) {
+		for _, dir := range dirs {
+			dir = normalizeClaudeCLIWorkspace(dir)
+			if dir == "" {
+				continue
+			}
+			p.addDirs = append(p.addDirs, dir)
 		}
 	}
 }
@@ -92,9 +126,9 @@ func WithClaudeCLIPermMode(mode string) ClaudeCLIOption {
 // WithClaudeCLISecurityHooks enables GoClaw security hooks for CLI tool calls.
 // Generates a settings file with PreToolUse hooks that enforce shell deny patterns
 // and workspace path restrictions.
-func WithClaudeCLISecurityHooks(workspace string, restrictToWorkspace bool) ClaudeCLIOption {
+func WithClaudeCLISecurityHooks(workspace string, restrictToWorkspace bool, extraReadDirs ...string) ClaudeCLIOption {
 	return func(p *ClaudeCLIProvider) {
-		settingsPath, cleanup, err := BuildCLIHooksConfig(workspace, restrictToWorkspace)
+		settingsPath, cleanup, err := BuildCLIHooksConfig(workspace, restrictToWorkspace, extraReadDirs...)
 		if err != nil {
 			slog.Warn("claude-cli: failed to build security hooks", "error", err)
 			return
@@ -110,6 +144,7 @@ func NewClaudeCLIProvider(cliPath string, opts ...ClaudeCLIOption) *ClaudeCLIPro
 		cliPath = "claude"
 	}
 	p := &ClaudeCLIProvider{
+		name:         "claude-cli",
 		cliPath:      cliPath,
 		defaultModel: "sonnet",
 		baseWorkDir:  defaultCLIWorkDir(),
@@ -122,8 +157,9 @@ func NewClaudeCLIProvider(cliPath string, opts ...ClaudeCLIOption) *ClaudeCLIPro
 	return p
 }
 
-func (p *ClaudeCLIProvider) Name() string        { return "claude-cli" }
-func (p *ClaudeCLIProvider) DefaultModel() string { return p.defaultModel }
+func (p *ClaudeCLIProvider) Name() string           { return p.name }
+func (p *ClaudeCLIProvider) DefaultModel() string   { return p.defaultModel }
+func (p *ClaudeCLIProvider) SupportsThinking() bool { return true }
 
 // Close cleans up temp files (per-session MCP configs, hooks settings). Implements io.Closer.
 func (p *ClaudeCLIProvider) Close() error {
