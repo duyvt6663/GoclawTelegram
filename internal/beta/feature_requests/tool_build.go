@@ -6,14 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -70,8 +73,6 @@ func BuildFollowupSenderID(featureID string) string {
 func IsBuildFollowupSender(senderID string) bool {
 	return strings.HasPrefix(strings.TrimSpace(senderID), BuildFollowupSenderPrefix)
 }
-
-var featureToolNamePattern = regexp.MustCompile(`Name\(\)\s+string\s*\{\s*return\s+"([^"]+)"\s*\}`)
 
 // buildFeatureTool runs a codex agent to plan and execute a beta feature.
 type buildFeatureTool struct {
@@ -812,6 +813,43 @@ func verifyBuildOutput(ctx context.Context, workspace, output string, buildStart
 	var detail strings.Builder
 	fmt.Fprintf(&detail, "Artifact manifest verified for %s.", manifest.FeatureRoot)
 
+	contractDetail, err := verifyFeatureContractTests(workspace, manifest.FeatureRoot)
+	if contractDetail != "" {
+		fmt.Fprintf(&detail, "\n\n%s", contractDetail)
+	}
+	if err != nil {
+		return strings.TrimSpace(detail.String()), fmt.Errorf("feature contract test verification failed: %w", err)
+	}
+
+	integrationDetail, runIntegration, err := verifyFeatureIntegrationTests(workspace, manifest.FeatureRoot)
+	if integrationDetail != "" {
+		fmt.Fprintf(&detail, "\n\n%s", integrationDetail)
+	}
+	if err != nil {
+		return strings.TrimSpace(detail.String()), fmt.Errorf("feature integration test verification failed: %w", err)
+	}
+
+	featureTestTarget := "./" + manifest.FeatureRoot
+	testOut, err := runBuildVerificationCommand(ctx, workspace, "go", "test", featureTestTarget)
+	if testOut != "" {
+		fmt.Fprintf(&detail, "\n\n$ go test %s\n%s", featureTestTarget, testOut)
+	}
+	if err != nil {
+		return strings.TrimSpace(detail.String()), fmt.Errorf("go test %s verification failed: %w", featureTestTarget, err)
+	}
+	fmt.Fprintf(&detail, "\n\ngo test %s passed.", featureTestTarget)
+
+	if runIntegration {
+		integrationOut, err := runBuildVerificationCommand(ctx, workspace, "go", "test", "-tags", "integration", "-count=1", "-v", featureTestTarget)
+		if integrationOut != "" {
+			fmt.Fprintf(&detail, "\n\n$ go test -tags integration -count=1 -v %s\n%s", featureTestTarget, integrationOut)
+		}
+		if err != nil {
+			return strings.TrimSpace(detail.String()), fmt.Errorf("go test -tags integration %s verification failed: %w", featureTestTarget, err)
+		}
+		fmt.Fprintf(&detail, "\n\ngo test -tags integration %s passed.", featureTestTarget)
+	}
+
 	buildOut, err := runBuildVerificationCommand(ctx, workspace, "go", "build", "./...")
 	if buildOut != "" {
 		fmt.Fprintf(&detail, "\n\n$ go build ./...\n%s", buildOut)
@@ -920,6 +958,156 @@ func verifyBuildArtifacts(workspace string, manifest buildArtifactsManifest, bui
 	return nil
 }
 
+func verifyFeatureContractTests(workspace, featureRoot string) (string, error) {
+	featureRoot, err := cleanBuildRelativePath(featureRoot)
+	if err != nil {
+		return "", fmt.Errorf("feature_root: %w", err)
+	}
+	root := filepath.Join(workspace, filepath.FromSlash(featureRoot))
+
+	var outboundHTTP bool
+	var contractTest bool
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", "node_modules", "vendor":
+				return filepath.SkipDir
+			default:
+				return nil
+			}
+		}
+		if !strings.HasSuffix(entry.Name(), ".go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		content := string(data)
+		if strings.HasSuffix(entry.Name(), "_test.go") {
+			if featureTestUsesLocalHTTPMock(content) {
+				contractTest = true
+			}
+			return nil
+		}
+		if featureSourceUsesOutboundHTTP(content) {
+			outboundHTTP = true
+		}
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("scan %s for contract tests: %w", featureRoot, err)
+	}
+	if !outboundHTTP {
+		return "", nil
+	}
+	if !contractTest {
+		return "", fmt.Errorf("%s performs outbound HTTP/provider calls but has no mocked request-shape test; add httptest.Server or an equivalent fake that validates endpoint, method, headers, and field names", featureRoot)
+	}
+	return fmt.Sprintf("External HTTP/provider contract test detected for %s.", featureRoot), nil
+}
+
+func verifyFeatureIntegrationTests(workspace, featureRoot string) (string, bool, error) {
+	featureRoot, err := cleanBuildRelativePath(featureRoot)
+	if err != nil {
+		return "", false, fmt.Errorf("feature_root: %w", err)
+	}
+	root := filepath.Join(workspace, filepath.FromSlash(featureRoot))
+
+	var outboundHTTP bool
+	var integrationTest bool
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			switch entry.Name() {
+			case ".git", "node_modules", "vendor":
+				return filepath.SkipDir
+			default:
+				return nil
+			}
+		}
+		if !strings.HasSuffix(entry.Name(), ".go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		content := string(data)
+		if strings.HasSuffix(entry.Name(), "_test.go") {
+			if featureTestUsesIntegrationTag(content) {
+				integrationTest = true
+			}
+			return nil
+		}
+		if featureSourceUsesOutboundHTTP(content) {
+			outboundHTTP = true
+		}
+		return nil
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("scan %s for integration tests: %w", featureRoot, err)
+	}
+	if !outboundHTTP {
+		return "", false, nil
+	}
+	if !integrationTest {
+		return "", false, fmt.Errorf("%s performs outbound HTTP/provider calls but has no live integration test; add a //go:build integration test that validates real provider/model compatibility without causing side effects when possible", featureRoot)
+	}
+	return fmt.Sprintf("Live integration test detected for %s.", featureRoot), true, nil
+}
+
+func featureSourceUsesOutboundHTTP(content string) bool {
+	markers := []string{
+		"http.NewRequest(",
+		"http.NewRequestWithContext(",
+		"http.DefaultClient.Do(",
+		"http.Get(",
+		"http.Head(",
+		"http.Post(",
+		"http.PostForm(",
+		"&http.Client{",
+		"http.Client{",
+		".Do(req)",
+		".Do(request)",
+		"Authorization\", \"Bearer ",
+		"api.openai.com",
+		"/images/edits",
+	}
+	for _, marker := range markers {
+		if strings.Contains(content, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func featureTestUsesIntegrationTag(content string) bool {
+	return strings.Contains(content, "//go:build integration") ||
+		strings.Contains(content, "// +build integration")
+}
+
+func featureTestUsesLocalHTTPMock(content string) bool {
+	markers := []string{
+		"httptest.NewServer(",
+		"httptest.NewTLSServer(",
+		"httptest.Server",
+		"RoundTrip(",
+		"httpmock.",
+	}
+	for _, marker := range markers {
+		if strings.Contains(content, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func manifestFeatureName(manifest buildArtifactsManifest) (string, error) {
 	featureRoot, err := cleanBuildRelativePath(manifest.FeatureRoot)
 	if err != nil {
@@ -961,21 +1149,110 @@ func discoverFeatureToolNames(workspace, featureRoot string) ([]string, error) {
 		if readErr != nil {
 			return readErr
 		}
-		for _, match := range featureToolNamePattern.FindAllStringSubmatch(string(src), -1) {
-			if len(match) < 2 {
-				continue
-			}
-			name := strings.TrimSpace(match[1])
-			if name != "" {
-				toolNames = append(toolNames, name)
-			}
+		names, parseErr := discoverToolNamesFromGoSource(src)
+		if parseErr != nil {
+			return fmt.Errorf("%s: %w", path, parseErr)
 		}
+		toolNames = append(toolNames, names...)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return uniqueToolNames(toolNames), nil
+}
+
+func discoverToolNamesFromGoSource(src []byte) ([]string, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), "", src, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	constants := collectStringConstants(file)
+	var toolNames []string
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name == nil || fn.Name.Name != "Name" || fn.Body == nil {
+			continue
+		}
+		if fn.Type == nil || fn.Type.Params == nil || len(fn.Type.Params.List) != 0 {
+			continue
+		}
+		if !funcReturnsString(fn) {
+			continue
+		}
+		name := toolNameFromFuncBody(fn.Body, constants)
+		if name != "" {
+			toolNames = append(toolNames, name)
+		}
+	}
+	return uniqueToolNames(toolNames), nil
+}
+
+func collectStringConstants(file *ast.File) map[string]string {
+	constants := map[string]string{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			valueSpec, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range valueSpec.Names {
+				if name == nil || i >= len(valueSpec.Values) {
+					continue
+				}
+				value := stringLiteralValue(valueSpec.Values[i])
+				if value == "" {
+					continue
+				}
+				constants[name.Name] = value
+			}
+		}
+	}
+	return constants
+}
+
+func funcReturnsString(fn *ast.FuncDecl) bool {
+	if fn == nil || fn.Type == nil || fn.Type.Results == nil || len(fn.Type.Results.List) != 1 {
+		return false
+	}
+	ident, ok := fn.Type.Results.List[0].Type.(*ast.Ident)
+	return ok && ident.Name == "string"
+}
+
+func toolNameFromFuncBody(body *ast.BlockStmt, constants map[string]string) string {
+	if body == nil {
+		return ""
+	}
+	for _, stmt := range body.List {
+		ret, ok := stmt.(*ast.ReturnStmt)
+		if !ok || len(ret.Results) != 1 {
+			continue
+		}
+		if value := stringLiteralValue(ret.Results[0]); value != "" {
+			return strings.TrimSpace(value)
+		}
+		if ident, ok := ret.Results[0].(*ast.Ident); ok {
+			return strings.TrimSpace(constants[ident.Name])
+		}
+	}
+	return ""
+}
+
+func stringLiteralValue(expr ast.Expr) string {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return ""
+	}
+	value, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return ""
+	}
+	return value
 }
 
 func addToolsToAgentAllowlist(ctx context.Context, agentStore store.AgentStore, agentKey string, toolNames []string) (bool, []string, error) {
@@ -1282,12 +1559,16 @@ func buildCodexPrompt(req *FeatureRequest) string {
 4. Register the feature in internal/beta/all/all.go
 5. If shared/common GoClaw code or builder infrastructure blocks the feature, fix that too
 6. You are explicitly allowed to change common/shared code when required to unblock this feature; no extra approval is needed
-7. If you register Telegram dynamic commands, upload handlers, or similar runtime hooks, you must channel-scope them with EnabledForChannel(...) so unrelated bots do not react. Gate them via the owning agent's tools_config allowlist and/or topic routing; never rely on process-global registration alone
-8. If the feature stores local files, do not assume DataDir is writable. Probe it first and fall back to a feature-local cache under the workspace, then /tmp if needed
-9. Run go build ./... and go vet ./... to verify compilation
-10. Keep iterating until build + vet pass inside this run; do not stop at analysis
-11. Write a brief plan summary as a comment in feature.go
-12. End your final response with exactly one single-line manifest in this format:
+7. If you register Telegram dynamic commands, upload handlers, or similar runtime hooks, you must channel-scope them with EnabledForChannel(...) so unrelated bots do not react. Gate them via the owning agent's tools_config allowlist and, when topic routing applies, also implement EnabledForContext(...) so matched topics must enable the feature explicitly
+8. Tool names must be deploy-discoverable so the builder can add them to the agent allowlist after build. Implement each tool Name() as a string literal return or a package-level string const return; do not compute tool names dynamically
+9. If a Telegram handler downloads media with DownloadMediaByFileID(...) and then validates the file path, remember the path is trusted channel-owned input and temp roots may be symlinked (/var vs /private/var on macOS). Normalize allowed roots with EvalSymlinks or process the downloaded file directly
+10. If the feature stores local files, do not assume DataDir is writable. Probe it first and fall back to a feature-local cache under the workspace, then /tmp if needed
+11. If the feature calls an external HTTP/provider API, add a local mocked-server test that verifies the exact request path, method, headers, JSON/multipart field names, and error parsing. Do not rely on live credentials for this test
+12. If the feature calls an external HTTP/provider API, also add a //go:build integration test that validates live provider/model compatibility. Keep it safe and cheap: prefer invalid payload probes or read-only checks that prove the request reaches provider validation without causing side effects
+13. Run go test ./internal/beta/<feature_folder>, go test -tags integration -count=1 -v ./internal/beta/<feature_folder> when integration tests exist, go build ./..., and go vet ./... to verify compilation and feature-specific behavior
+14. Keep iterating until test + integration + build + vet pass inside this run; do not stop at analysis
+15. Write a brief plan summary as a comment in feature.go
+16. End your final response with exactly one single-line manifest in this format:
 BUILD_ARTIFACTS: {"feature_root":"internal/beta/<feature_folder>","files":["internal/beta/<feature_folder>/feature.go","internal/beta/all/all.go"]}
 Only list repo-relative paths that actually exist after your changes.
 
@@ -1317,12 +1598,16 @@ func buildRepairPrompt(req *FeatureRequest, output, summary string, attempt, att
 ## Repair Rules:
 1. Fix the failure that blocked the previous attempt.
 2. You are explicitly allowed to modify shared/common GoClaw code, tooling, and beta infrastructure when that is what blocks the feature.
-3. If the feature uses Telegram dynamic handlers, make sure they are channel-scoped with EnabledForChannel(...) so only the intended bot(s) react.
-4. If the feature writes local cached files, make sure the write path is actually writable and falls back away from an unwritable DataDir.
-5. Re-run go build ./... and go vet ./... inside this run.
-6. If the next failure reveals another shared-code blocker, fix that too instead of stopping.
-7. Do not ask for approval. Do not stop at analysis. Leave the repo in a state where this feature builds cleanly if possible.
-8. End your final response with exactly one single-line manifest in this format:
+3. If the feature uses Telegram dynamic handlers, make sure they are channel-scoped with EnabledForChannel(...) so only the intended bot(s) react, and implement EnabledForContext(...) when topic routing should control the command in specific topics.
+4. Make sure feature tool names are discoverable for post-build allowlisting: Name() should return a string literal or a package-level string const, not a computed value.
+5. If the feature downloads Telegram media and validates the returned local path, normalize symlinked temp roots or process the trusted downloaded file directly.
+6. If the feature writes local cached files, make sure the write path is actually writable and falls back away from an unwritable DataDir.
+7. If the feature calls an external HTTP/provider API, add or repair a local mocked-server test that verifies the exact request path, method, headers, JSON/multipart field names, and error parsing. Do not rely on live credentials for this test.
+8. If the feature calls an external HTTP/provider API, add or repair a //go:build integration test that validates live provider/model compatibility. Keep it safe and cheap: prefer invalid payload probes or read-only checks that prove the request reaches provider validation without causing side effects.
+9. Re-run go test ./internal/beta/<feature_folder>, go test -tags integration -count=1 -v ./internal/beta/<feature_folder> when integration tests exist, go build ./..., and go vet ./... inside this run.
+10. If the next failure reveals another shared-code blocker, fix that too instead of stopping.
+11. Do not ask for approval. Do not stop at analysis. Leave the repo in a state where this feature builds cleanly if possible.
+12. End your final response with exactly one single-line manifest in this format:
 BUILD_ARTIFACTS: {"feature_root":"internal/beta/<feature_folder>","files":["internal/beta/<feature_folder>/feature.go","internal/beta/all/all.go"]}
 Only list repo-relative paths that actually exist after your changes.
 

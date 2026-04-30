@@ -360,11 +360,11 @@ func TestBuildProcessEnvSeedsWritableCodexHome(t *testing.T) {
 		t.Fatalf("mkdir source codex rules: %v", err)
 	}
 	files := map[string]string{
-		filepath.Join(sourceCodex, "auth.json"):      `{"token":"secret"}`,
-		filepath.Join(sourceCodex, "config.toml"):    "model = \"gpt-5.4\"\n",
-		filepath.Join(sourceCodex, "hooks.json"):     "{}\n",
-		filepath.Join(sourceCodex, "installation_id"): "install-1\n",
-		filepath.Join(sourceCodex, "version.json"):   "{\"version\":\"0.120.0\"}\n",
+		filepath.Join(sourceCodex, "auth.json"):              `{"token":"secret"}`,
+		filepath.Join(sourceCodex, "config.toml"):            "model = \"gpt-5.4\"\n",
+		filepath.Join(sourceCodex, "hooks.json"):             "{}\n",
+		filepath.Join(sourceCodex, "installation_id"):        "install-1\n",
+		filepath.Join(sourceCodex, "version.json"):           "{\"version\":\"0.120.0\"}\n",
 		filepath.Join(sourceCodex, "rules", "default.rules"): "allow = true\n",
 	}
 	for path, content := range files {
@@ -435,6 +435,47 @@ func (t *runTool) Name() string { return "example_run" }
 		t.Fatalf("discoverFeatureToolNames() error = %v", err)
 	}
 	want := []string{"example_configure", "example_run"}
+	if len(got) != len(want) {
+		t.Fatalf("len(discovered tools) = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("discovered tools[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestDiscoverFeatureToolNamesFindsConstBackedToolNames(t *testing.T) {
+	repoRoot := newTestBuildRepo(t)
+	featureDir := filepath.Join(repoRoot, "internal", "beta", "gpt_image_edit")
+	if err := os.MkdirAll(featureDir, 0o755); err != nil {
+		t.Fatalf("mkdir feature dir: %v", err)
+	}
+	files := map[string]string{
+		filepath.Join(featureDir, "feature.go"): `package gptimageedit
+const (
+	featureName = "gpt_image_edit"
+	toolName = "gpt_image_edit"
+)
+type GPTImageEditFeature struct{}
+func (f *GPTImageEditFeature) Name() string { return featureName }
+`,
+		filepath.Join(featureDir, "tool_edit.go"): `package gptimageedit
+type editTool struct{}
+func (t *editTool) Name() string { return toolName }
+`,
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	got, err := discoverFeatureToolNames(repoRoot, "internal/beta/gpt_image_edit")
+	if err != nil {
+		t.Fatalf("discoverFeatureToolNames() error = %v", err)
+	}
+	want := []string{"gpt_image_edit"}
 	if len(got) != len(want) {
 		t.Fatalf("len(discovered tools) = %d, want %d (%v)", len(got), len(want), got)
 	}
@@ -541,6 +582,136 @@ func TestExtractBuildArtifactsParsesSingleLineManifest(t *testing.T) {
 	}
 	if len(got.Files) != 2 {
 		t.Fatalf("len(Files) = %d, want 2", len(got.Files))
+	}
+}
+
+func TestVerifyFeatureContractTestsRequiresMockForOutboundHTTP(t *testing.T) {
+	workspace := t.TempDir()
+	featureRoot := "internal/beta/outbound_api"
+	writeFeatureTestFile(t, workspace, featureRoot+"/feature.go", `package outboundapi
+
+import (
+	"context"
+	"net/http"
+)
+
+func call(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/images/edits", nil)
+	if err != nil {
+		return err
+	}
+	_, err = http.DefaultClient.Do(req)
+	return err
+}
+`)
+
+	if detail, err := verifyFeatureContractTests(workspace, featureRoot); err == nil {
+		t.Fatalf("verifyFeatureContractTests() detail = %q, want missing mocked-server test error", detail)
+	}
+
+	writeFeatureTestFile(t, workspace, featureRoot+"/feature_test.go", `package outboundapi
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestCallRequestShape(t *testing.T) {
+	_ = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+}
+`)
+
+	detail, err := verifyFeatureContractTests(workspace, featureRoot)
+	if err != nil {
+		t.Fatalf("verifyFeatureContractTests() error = %v", err)
+	}
+	if !strings.Contains(detail, "External HTTP/provider contract test detected") {
+		t.Fatalf("verifyFeatureContractTests() detail = %q, want contract test detail", detail)
+	}
+}
+
+func TestVerifyFeatureIntegrationTestsRequiresTaggedLiveTestForOutboundHTTP(t *testing.T) {
+	workspace := t.TempDir()
+	featureRoot := "internal/beta/outbound_api"
+	writeFeatureTestFile(t, workspace, featureRoot+"/client.go", `package outboundapi
+
+import (
+	"context"
+	"net/http"
+)
+
+func call(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.openai.com/v1/images/edits", nil)
+	if err != nil {
+		return err
+	}
+	_, err = http.DefaultClient.Do(req)
+	return err
+}
+`)
+
+	if detail, run, err := verifyFeatureIntegrationTests(workspace, featureRoot); err == nil {
+		t.Fatalf("verifyFeatureIntegrationTests() detail=%q run=%v, want missing integration test error", detail, run)
+	}
+
+	writeFeatureTestFile(t, workspace, featureRoot+"/client_integration_test.go", `//go:build integration
+
+package outboundapi
+
+import "testing"
+
+func TestLiveIntegration(t *testing.T) {}
+`)
+
+	detail, run, err := verifyFeatureIntegrationTests(workspace, featureRoot)
+	if err != nil {
+		t.Fatalf("verifyFeatureIntegrationTests() error = %v", err)
+	}
+	if !run {
+		t.Fatal("verifyFeatureIntegrationTests() run=false, want true")
+	}
+	if !strings.Contains(detail, "Live integration test detected") {
+		t.Fatalf("verifyFeatureIntegrationTests() detail = %q, want live integration detail", detail)
+	}
+}
+
+func TestVerifyFeatureContractTestsIgnoresHTTPRoutes(t *testing.T) {
+	workspace := t.TempDir()
+	featureRoot := "internal/beta/http_route"
+	writeFeatureTestFile(t, workspace, featureRoot+"/handler.go", `package httproute
+
+import "net/http"
+
+func handle(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+}
+`)
+
+	detail, err := verifyFeatureContractTests(workspace, featureRoot)
+	if err != nil {
+		t.Fatalf("verifyFeatureContractTests() route-only error = %v", err)
+	}
+	if detail != "" {
+		t.Fatalf("verifyFeatureContractTests() route-only detail = %q, want empty", detail)
+	}
+	integrationDetail, run, err := verifyFeatureIntegrationTests(workspace, featureRoot)
+	if err != nil {
+		t.Fatalf("verifyFeatureIntegrationTests() route-only error = %v", err)
+	}
+	if integrationDetail != "" || run {
+		t.Fatalf("verifyFeatureIntegrationTests() route-only detail=%q run=%v, want empty/false", integrationDetail, run)
+	}
+}
+
+func writeFeatureTestFile(t *testing.T, workspace, rel, content string) {
+	t.Helper()
+	path := filepath.Join(workspace, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q): %v", path, err)
 	}
 }
 
@@ -697,6 +868,30 @@ func TestBuildRepairPromptAllowsSharedCodeFixes(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "undefined helperX") {
 		t.Fatalf("buildRepairPrompt() = %q, want previous failure summary", prompt)
+	}
+	if !strings.Contains(prompt, "go test ./internal/beta/<feature_folder>") {
+		t.Fatalf("buildRepairPrompt() = %q, want feature test instruction", prompt)
+	}
+	if !strings.Contains(prompt, "mocked-server test") {
+		t.Fatalf("buildRepairPrompt() = %q, want external API contract test instruction", prompt)
+	}
+	if !strings.Contains(prompt, "go test -tags integration") {
+		t.Fatalf("buildRepairPrompt() = %q, want live integration test instruction", prompt)
+	}
+}
+
+func TestBuildCodexPromptRequiresFeatureSpecificTests(t *testing.T) {
+	req := newTestFeatureRequest("Image Edit", "Build an OpenAI image edit integration.")
+
+	prompt := buildCodexPrompt(req)
+	if !strings.Contains(prompt, "go test ./internal/beta/<feature_folder>") {
+		t.Fatalf("buildCodexPrompt() = %q, want feature test instruction", prompt)
+	}
+	if !strings.Contains(prompt, "mocked-server test") {
+		t.Fatalf("buildCodexPrompt() = %q, want external API contract test instruction", prompt)
+	}
+	if !strings.Contains(prompt, "go test -tags integration") {
+		t.Fatalf("buildCodexPrompt() = %q, want live integration test instruction", prompt)
 	}
 }
 

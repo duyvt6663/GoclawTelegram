@@ -7,7 +7,7 @@ description: |
   "experimental feature", "feature flag", "isolated feature".
 metadata:
   author: GoClaw
-  version: "1.1.0"
+  version: "1.1.3"
 ---
 
 # Beta Feature Builder
@@ -124,13 +124,17 @@ Required rule for new Telegram features:
 
 1. If the feature registers a dynamic command, upload handler, or similar Telegram runtime hook, implement channel scoping.
 2. Gate that scoping using the owning agent’s `tools_config` allowlist and/or topic routing, following existing patterns such as `internal/beta/lop_pho/feature.go`.
-3. Add a regression test that proves the intended bot is enabled and unrelated bots are disabled.
+3. If topic routing is supported, implement the context gate too: `EnabledForContext(ctx, channel, cmdCtx)` should allow the command only when the matched topic route enables the feature.
+4. Remember that topic routing alone does not expose a Telegram command if `EnabledForChannel` checks the owning agent’s `tools_config`. The agent allowlist must include the feature tool name.
+5. Add regression tests that prove the intended bot/topic is enabled and unrelated bots/topics are disabled.
 
 Do not ship Telegram features that:
 
 - register runtime handlers globally with no channel gate
 - auto-create per-channel state from an unscoped handler
 - assume a command/upload should be handled by every Telegram bot in the process
+
+When a Telegram handler downloads media with `channel.DownloadMediaByFileID(...)`, treat the returned path as trusted channel-owned input. If it is passed through a generic path allowlist, normalize symlinked roots with `filepath.EvalSymlinks` first. On macOS, temp paths can compare as `/var/...` vs `/private/var/...` and otherwise fail a valid temp-directory check.
 
 ## Writable Storage Rules
 
@@ -144,6 +148,14 @@ Required rule for new file-caching features:
 4. Add a regression test that proves the feature falls back cleanly when the configured data dir is not writable.
 
 Prefer feature-local cache roots over writing directly into shared global paths. Keep cached files under the feature’s own subtree.
+
+## External API Contract Rules
+
+Beta features that call external HTTP/provider APIs must include a local mocked-server test. The test should assert the exact endpoint path, method, required headers, JSON or multipart field names, representative success parsing, and representative provider error parsing.
+
+They must also include a `//go:build integration` live compatibility test. Keep it safe and cheap: prefer invalid payload probes, read-only model checks, or other calls that prove the request reaches provider validation without creating billable artifacts or side effects when possible.
+
+Do not mark an external API feature done based only on `go build`/`go vet`, or only on mocked tests. A provider integration can compile and pass mocks while the real provider rejects the model, endpoint, or parameter set. Use `httptest.Server` for request shape, then `go test -tags integration -count=1 -v ./internal/beta/{name}` for live provider compatibility.
 
 ## Adding Agent Tools
 
@@ -168,6 +180,13 @@ func (t *myTool) Execute(ctx context.Context, args map[string]any) *tools.Result
     return tools.NewResult("output: " + val)
 }
 ```
+
+Keep tool names deploy-discoverable. The feature builder auto-adds discovered tool names to the triggering agent’s `tools_config`, so each tool’s `Name()` should return either:
+
+- a string literal, for example `return "my_tool_name"`
+- a package-level const assigned to a string literal, for example `const toolName = "my_tool_name"; func (t *myTool) Name() string { return toolName }`
+
+Do not compute tool names dynamically. If a Telegram command is gated by `tools_config`, this discoverability is what lets the bot use the command immediately after build + deploy.
 
 Optional tool interfaces (implement to opt in):
 - `ContextualTool` — receive channel/chatID context
@@ -263,10 +282,18 @@ See `internal/beta/_example/` for a complete working example with an echo tool a
 After creating a beta feature, run:
 
 ```bash
+go test ./internal/beta/{name}       # Feature-specific tests
+go test -tags integration -count=1 -v ./internal/beta/{name}  # Live provider compatibility for external APIs
 go build ./...                      # PG build
 go build -tags sqliteonly ./...     # SQLite build
 go vet ./...                        # Static analysis
 ```
+
+For external HTTP/provider API features, also verify:
+
+- mocked-server tests validate request field names exactly, including snake_case/camelCase spelling
+- mocked-server tests validate the feature handles provider errors without reporting false success
+- integration-tagged tests validate the real provider accepts the configured model/endpoint/parameter set before any feature is reported complete
 
 For Telegram features, also verify:
 

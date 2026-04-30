@@ -61,3 +61,19 @@ func TestBuildSystemPrompt_PrefersLiveToolDescriptions(t *testing.T) {
 		t.Fatalf("expected live tool description in prompt, got:\n%s", prompt)
 	}
 }
+
+func TestBuildSystemPrompt_GroupReplyHint_PrefersAnsweringDirectMentions(t *testing.T) {
+	prompt := BuildSystemPrompt(SystemPromptConfig{
+		PeerKind: "group",
+	})
+
+	wantContains := []string{
+		"A direct @mention or a direct question addressed to you is addressed to you. Do not use NO_REPLY in that case.",
+		"If a directly addressed question clearly matches one of your available tools or capabilities, answer it or use the relevant tool instead of treating it as background chatter.",
+	}
+	for _, want := range wantContains {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected %q in prompt, got:\n%s", want, prompt)
+		}
+	}
+}

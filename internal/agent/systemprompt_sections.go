@@ -269,6 +269,8 @@ func buildGroupChatReplyHint() []string {
 		"## Reply Context",
 		"",
 		"A reply to your message does NOT always mean they are talking to you.",
+		"A direct @mention or a direct question addressed to you is addressed to you. Do not use NO_REPLY in that case.",
+		"If a directly addressed question clearly matches one of your available tools or capabilities, answer it or use the relevant tool instead of treating it as background chatter.",
 		"If someone replies to your message but the content addresses or @mentions another person and doesn't ask you anything, use NO_REPLY — it's not your conversation.",
 		"",
 	}

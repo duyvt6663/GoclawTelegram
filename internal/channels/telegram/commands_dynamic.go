@@ -12,6 +12,7 @@ import (
 // DynamicCommandContext carries the normalized Telegram command plus enough
 // routing metadata for beta features to reply in the same chat/topic.
 type DynamicCommandContext struct {
+	Message         *telego.Message
 	Command         string
 	Text            string
 	ChatID          int64

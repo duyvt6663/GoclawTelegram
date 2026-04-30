@@ -250,6 +250,7 @@ func (c *Channel) handleBotCommand(ctx context.Context, message *telego.Message,
 	}
 
 	if DispatchDynamicCommand(ctx, c, cmd, DynamicCommandContext{
+		Message:         message,
 		Command:         cmd,
 		Text:            text,
 		ChatID:          chatID,
