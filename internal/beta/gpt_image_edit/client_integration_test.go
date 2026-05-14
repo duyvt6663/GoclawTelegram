@@ -22,12 +22,12 @@ func TestOpenAIImageEditLiveIntegrationRejectsOnlyAfterModelAndParameterValidati
 		apiKey:  apiKey,
 		apiBase: resolveOpenAIBase(nil),
 	}
-	_, statusCode, err := feature.callOpenAIEditOnce(ctx, &imageInput{
+	_, statusCode, err := feature.callOpenAIEditOnce(ctx, []*imageInput{{
 		Data:     []byte("not-an-image"),
 		MIME:     "image/png",
 		FileName: "invalid.png",
 		Size:     int64(len("not-an-image")),
-	}, EditRequest{
+	}}, EditRequest{
 		Prompt:       "integration compatibility probe; this should fail before image generation",
 		OutputFormat: defaultOutputFormat,
 	})

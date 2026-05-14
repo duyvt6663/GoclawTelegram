@@ -22,17 +22,25 @@ type openAIEditOutput struct {
 	Usage map[string]any
 }
 
-func (f *GPTImageEditFeature) callOpenAIEdit(ctx context.Context, input *imageInput, request EditRequest) (*openAIEditOutput, error) {
+func (f *GPTImageEditFeature) callOpenAIEdit(ctx context.Context, inputs []*imageInput, request EditRequest) (*openAIEditOutput, error) {
 	if strings.TrimSpace(f.apiKey) == "" {
 		return nil, fmt.Errorf("OpenAI API key is required for %s", featureName)
 	}
-	if input == nil || len(input.Data) == 0 {
+	if len(inputs) == 0 {
 		return nil, fmt.Errorf("image is required")
+	}
+	if len(inputs) > maxInputImages {
+		return nil, fmt.Errorf("too many input images (%d max)", maxInputImages)
+	}
+	for _, input := range inputs {
+		if input == nil || len(input.Data) == 0 {
+			return nil, fmt.Errorf("image is required")
+		}
 	}
 
 	var lastErr error
 	for attempt := 1; attempt <= openAIEditAttempts; attempt++ {
-		output, statusCode, err := f.callOpenAIEditOnce(ctx, input, request)
+		output, statusCode, err := f.callOpenAIEditOnce(ctx, inputs, request)
 		if err == nil {
 			return output, nil
 		}
@@ -51,20 +59,35 @@ func (f *GPTImageEditFeature) callOpenAIEdit(ctx context.Context, input *imageIn
 	return nil, lastErr
 }
 
-func (f *GPTImageEditFeature) callOpenAIEditOnce(ctx context.Context, input *imageInput, request EditRequest) (*openAIEditOutput, int, error) {
+func (f *GPTImageEditFeature) callOpenAIEditOnce(ctx context.Context, inputs []*imageInput, request EditRequest) (*openAIEditOutput, int, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 
-	fileName := input.FileName
-	if strings.TrimSpace(fileName) == "" {
-		fileName = "input." + extensionForMIME(input.MIME)
+	if len(inputs) == 0 {
+		return nil, 0, fmt.Errorf("image is required")
 	}
-	part, err := createImageFormFile(writer, "image", fileName, input.MIME)
-	if err != nil {
-		return nil, 0, fmt.Errorf("create image form file: %w", err)
+	if len(inputs) > maxInputImages {
+		return nil, 0, fmt.Errorf("too many input images (%d max)", maxInputImages)
 	}
-	if _, err := part.Write(input.Data); err != nil {
-		return nil, 0, fmt.Errorf("write image form file: %w", err)
+	imageField := "image"
+	if len(inputs) > 1 {
+		imageField = "image[]"
+	}
+	for i, input := range inputs {
+		if input == nil || len(input.Data) == 0 {
+			return nil, 0, fmt.Errorf("image is required")
+		}
+		fileName := input.FileName
+		if strings.TrimSpace(fileName) == "" {
+			fileName = fmt.Sprintf("input-%d.%s", i+1, extensionForMIME(input.MIME))
+		}
+		part, err := createImageFormFile(writer, imageField, fileName, input.MIME)
+		if err != nil {
+			return nil, 0, fmt.Errorf("create image form file: %w", err)
+		}
+		if _, err := part.Write(input.Data); err != nil {
+			return nil, 0, fmt.Errorf("write image form file: %w", err)
+		}
 	}
 
 	fields := map[string]string{

@@ -16,7 +16,7 @@ type editTool struct {
 func (t *editTool) Name() string { return toolName }
 
 func (t *editTool) Description() string {
-	return "Edit an attached or workspace image with OpenAI GPT Image. Supports object removal, replacement/inpainting, style transfer, background changes, text edits, and upscaling."
+	return "Edit or generate from one or more attached/workspace images with OpenAI GPT Image. Supports object removal, replacement/inpainting, style transfer, background changes, text edits, upscaling, and multi-image references."
 }
 
 func (t *editTool) Parameters() map[string]any {
@@ -35,6 +35,13 @@ func (t *editTool) Parameters() map[string]any {
 			"image_path": map[string]any{
 				"type":        "string",
 				"description": "Optional path to a png, jpg, or webp image. If omitted, the latest attached chat image is used.",
+			},
+			"image_paths": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "string",
+				},
+				"description": "Optional ordered list of png, jpg, or webp image paths to use as references. The first image is treated as the primary image.",
 			},
 			"output_format": map[string]any{
 				"type":        "string",
@@ -64,6 +71,7 @@ func (t *editTool) Execute(ctx context.Context, args map[string]any) *tools.Resu
 		Prompt:       stringArg(args, "prompt"),
 		Operation:    stringArg(args, "operation"),
 		ImagePath:    stringArg(args, "image_path"),
+		ImagePaths:   stringSliceArg(args, "image_paths"),
 		OutputFormat: stringArg(args, "output_format"),
 		Size:         stringArg(args, "size"),
 		Quality:      stringArg(args, "quality"),

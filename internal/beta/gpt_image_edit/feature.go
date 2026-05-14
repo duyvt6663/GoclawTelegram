@@ -23,15 +23,19 @@ import (
 )
 
 const (
-	featureName         = "gpt_image_edit"
-	toolName            = "gpt_image_edit"
-	commandName         = "/image_edit"
-	defaultModel        = "gpt-image-2"
-	defaultOpenAIBase   = "https://api.openai.com/v1"
-	defaultOutputFormat = "png"
+	featureName          = "gpt_image_edit"
+	toolName             = "gpt_image_edit"
+	commandName          = "/image_edit"
+	imageRefCommandName  = "/image_ref"
+	imageRefsCommandName = "/image_refs"
+	imageGenCommandName  = "/image_gen"
+	defaultModel         = "gpt-image-2"
+	defaultOpenAIBase    = "https://api.openai.com/v1"
+	defaultOutputFormat  = "png"
 
 	maxPromptRunes = 32000
 	maxImageBytes  = 50 << 20
+	maxInputImages = 16
 )
 
 // GPTImageEditFeature adds GPT Image edits for attached chat images.
@@ -57,17 +61,20 @@ type GPTImageEditFeature struct {
 }
 
 type EditRequest struct {
-	Prompt       string `json:"prompt"`
-	Operation    string `json:"operation,omitempty"`
-	ImagePath    string `json:"image_path,omitempty"`
-	ImageBase64  string `json:"image_base64,omitempty"`
-	ImageMIME    string `json:"image_mime,omitempty"`
-	OutputFormat string `json:"output_format,omitempty"`
-	Size         string `json:"size,omitempty"`
-	Quality      string `json:"quality,omitempty"`
-	Source       string `json:"source,omitempty"`
-	Channel      string `json:"channel,omitempty"`
-	ChatID       string `json:"chat_id,omitempty"`
+	Prompt       string   `json:"prompt"`
+	Operation    string   `json:"operation,omitempty"`
+	ImagePath    string   `json:"image_path,omitempty"`
+	ImagePaths   []string `json:"image_paths,omitempty"`
+	ImageBase64  string   `json:"image_base64,omitempty"`
+	ImageBase64s []string `json:"image_base64s,omitempty"`
+	ImageMIME    string   `json:"image_mime,omitempty"`
+	ImageMIMEs   []string `json:"image_mimes,omitempty"`
+	OutputFormat string   `json:"output_format,omitempty"`
+	Size         string   `json:"size,omitempty"`
+	Quality      string   `json:"quality,omitempty"`
+	Source       string   `json:"source,omitempty"`
+	Channel      string   `json:"channel,omitempty"`
+	ChatID       string   `json:"chat_id,omitempty"`
 }
 
 type EditPayload struct {
@@ -126,6 +133,9 @@ func (f *GPTImageEditFeature) Init(deps beta.Deps) error {
 	}
 	if deps.ChannelManager != nil {
 		telegramchannel.RegisterDynamicCommand(&imageEditCommand{feature: f})
+		telegramchannel.RegisterDynamicCommand(&imageRefCommand{feature: f})
+		telegramchannel.RegisterDynamicCommand(&imageRefsCommand{feature: f})
+		telegramchannel.RegisterDynamicCommand(&imageGenCommand{feature: f})
 		f.syncTelegramMenus()
 	}
 
@@ -135,6 +145,9 @@ func (f *GPTImageEditFeature) Init(deps beta.Deps) error {
 
 func (f *GPTImageEditFeature) Shutdown(ctx context.Context) error {
 	telegramchannel.UnregisterDynamicCommand(commandName)
+	telegramchannel.UnregisterDynamicCommand(imageRefCommandName)
+	telegramchannel.UnregisterDynamicCommand(imageRefsCommandName)
+	telegramchannel.UnregisterDynamicCommand(imageGenCommandName)
 	topicrouting.UnregisterTopicFeatureTools(featureName)
 	if f.cancel != nil {
 		f.cancel()
@@ -165,15 +178,16 @@ func (f *GPTImageEditFeature) edit(ctx context.Context, request EditRequest, inc
 	if err != nil {
 		return nil, err
 	}
-	input, err := f.resolveImageInput(ctx, normalized)
+	inputs, err := f.resolveImageInputs(ctx, normalized)
 	if err != nil {
 		return nil, err
 	}
+	inputSource, inputMIME, inputBytes := summarizeImageInputs(inputs)
 
 	tenantID := tenantKeyFromCtx(ctx)
 	start := time.Now()
 	runID := uuid.NewString()
-	output, err := f.callOpenAIEdit(ctx, input, normalized)
+	output, err := f.callOpenAIEdit(ctx, inputs, normalized)
 	latency := time.Since(start)
 	if err != nil {
 		f.persistRunBestEffort(&runRecord{
@@ -181,9 +195,9 @@ func (f *GPTImageEditFeature) edit(ctx context.Context, request EditRequest, inc
 			TenantID:     tenantID,
 			Prompt:       normalized.Prompt,
 			Operation:    normalized.Operation,
-			InputSource:  input.Source,
-			InputMIME:    input.MIME,
-			InputBytes:   input.Size,
+			InputSource:  inputSource,
+			InputMIME:    inputMIME,
+			InputBytes:   inputBytes,
 			OutputFormat: normalized.OutputFormat,
 			Status:       runStatusFailed,
 			ErrorMessage: trimForStorage(err.Error(), 1200),
@@ -219,9 +233,9 @@ func (f *GPTImageEditFeature) edit(ctx context.Context, request EditRequest, inc
 		TenantID:     tenantID,
 		Prompt:       normalized.Prompt,
 		Operation:    normalized.Operation,
-		InputSource:  input.Source,
-		InputMIME:    input.MIME,
-		InputBytes:   input.Size,
+		InputSource:  inputSource,
+		InputMIME:    inputMIME,
+		InputBytes:   inputBytes,
 		OutputPath:   outputPath,
 		OutputMIME:   payload.OutputMIME,
 		OutputBytes:  payload.OutputBytes,

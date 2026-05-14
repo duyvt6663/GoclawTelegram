@@ -344,6 +344,19 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		uploadMatchCtx = store.WithTenantID(uploadMatchCtx, store.MasterTenantID)
 	}
 	uploadHandler := matchingDynamicUploadHandler(uploadMatchCtx, c, message)
+	dynamicMsgCtx := DynamicMessageContext{
+		Message:         message,
+		Text:            content,
+		ChatID:          chatID,
+		ChatIDStr:       chatIDStr,
+		LocalKey:        localKey,
+		SenderID:        senderID,
+		UserID:          userID,
+		IsGroup:         isGroup,
+		IsForum:         isForum,
+		MessageThreadID: messageThreadID,
+	}
+	messageHandler := matchingDynamicMessageHandler(uploadMatchCtx, c, dynamicMsgCtx)
 
 	// Enrich content with forward/reply/location context
 	msgCtx := buildMessageContext(message, c.bot.Username())
@@ -366,6 +379,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 	mentionMode := topicCfg.effectiveMentionMode(c.mentionMode)
 	implicitReactionMedia := false
 	implicitUploadHandling := uploadHandler != nil
+	implicitMessageHandling := messageHandler != nil
 	if isGroup && (topicCfg.effectiveRequireMention(c.requireMention) || mentionMode == "yield") {
 		botUsername := c.bot.Username()
 
@@ -421,6 +435,9 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		if !wasMentioned && !otherMentioned && implicitUploadHandling {
 			wasMentioned = true
 		}
+		if !wasMentioned && !otherMentioned && implicitMessageHandling {
+			wasMentioned = true
+		}
 
 		// Yield mode: skip only if another bot/user is explicitly mentioned (not us).
 		// If nobody is mentioned → respond. If we are mentioned → respond.
@@ -438,6 +455,7 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 			"mention_mode", mentionMode,
 			"reaction_media_bypass", implicitReactionMedia,
 			"upload_bypass", implicitUploadHandling,
+			"message_bypass", implicitMessageHandling,
 			"was_mentioned", wasMentioned,
 			"text_preview", channels.Truncate(content, 60),
 		)
@@ -517,6 +535,8 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 		}
 		return uploadSend(replyCtx, bus.OutboundMessage{Content: text})
 	}
+	dynamicMsgCtx.Send = uploadSend
+	dynamicMsgCtx.Reply = uploadReply
 
 	// --- Group pairing gate (only reached when bot is mentioned) ---
 	if isGroup && topicCfg.groupPolicy == "pairing" && c.pairingService != nil {
@@ -551,6 +571,11 @@ func (c *Channel) handleMessage(ctx context.Context, update telego.Update) {
 			Send:            uploadSend,
 			Reply:           uploadReply,
 		}) {
+			return
+		}
+	}
+	if messageHandler != nil {
+		if messageHandler.HandleMessage(uploadMatchCtx, c, dynamicMsgCtx) {
 			return
 		}
 	}

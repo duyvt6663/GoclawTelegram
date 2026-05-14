@@ -70,7 +70,11 @@ func (c *imageEditCommand) Handle(ctx context.Context, channel *telegramchannel.
 
 	prompt := promptFromCommandText(cmdCtx.Text, cmdCtx.Command)
 	if prompt == "" {
-		cmdCtx.Reply(ctx, "Usage: /image_edit <edit instruction> as the caption of a png, jpg, or webp image, or reply to an image with that command.")
+		cmdCtx.Reply(ctx, "Usage: /image_edit <edit instruction> as the caption of a png, jpg, webp image, or static sticker.\nFor multiple images: save refs with /image_ref <name>. For profile photos: reply to a user with /image_ref avatar <name>.")
+		return true
+	}
+	if labels, refPrompt, ok := parseImageRefGenerationPrompt(prompt); ok {
+		(&imageGenCommand{feature: c.feature}).handleGenerateFromRefs(ctx, channel, cmdCtx, labels, imageGenMessageRefs(cmdCtx.Message), refPrompt)
 		return true
 	}
 	ref, err := imageRefFromTelegramMessage(cmdCtx.Message)
@@ -82,6 +86,14 @@ func (c *imageEditCommand) Handle(ctx context.Context, channel *telegramchannel.
 		cmdCtx.Reply(ctx, fmt.Sprintf("That image is too large for GPT Image editing. Max size is %d MB.", maxImageBytes>>20))
 		return true
 	}
+	downloadLimit := int64(maxImageBytes)
+	if telegramLimit := channel.MediaDownloadMaxBytes(); telegramLimit > 0 && telegramLimit < downloadLimit {
+		downloadLimit = telegramLimit
+	}
+	if ref.Size > downloadLimit {
+		cmdCtx.Reply(ctx, fmt.Sprintf("That image is too large to download from Telegram. Max size is %d MB.", downloadLimit>>20))
+		return true
+	}
 
 	cmdCtx.Reply(ctx, "Editing image with "+defaultModel+"...")
 
@@ -90,7 +102,7 @@ func (c *imageEditCommand) Handle(ctx context.Context, channel *telegramchannel.
 		defer c.feature.workers.Done()
 
 		runCtx := inheritFeatureContext(c.feature.backgroundCtx, ctx)
-		tempPath, err := channel.DownloadMediaByFileID(runCtx, ref.FileID, maxImageBytes)
+		tempPath, err := channel.DownloadMediaByFileID(runCtx, ref.FileID, downloadLimit)
 		if err != nil {
 			cmdCtx.Reply(runCtx, "I received the image but could not download it from Telegram.")
 			slog.Warn("GPT image edit Telegram download failed", "error", err, "chat_id", cmdCtx.ChatIDStr)
@@ -155,7 +167,7 @@ func promptFromCommandText(text, command string) string {
 
 func imageRefFromTelegramMessage(message *telego.Message) (telegramImageRef, error) {
 	if message == nil {
-		return telegramImageRef{}, fmt.Errorf("attach an image or reply to an image with /image_edit")
+		return telegramImageRef{}, fmt.Errorf("attach an image/sticker or reply to one with /image_edit")
 	}
 	if ref, ok := currentTelegramImageRef(message, "current_message"); ok {
 		return ref, nil
@@ -165,7 +177,7 @@ func imageRefFromTelegramMessage(message *telego.Message) (telegramImageRef, err
 			return ref, nil
 		}
 	}
-	return telegramImageRef{}, fmt.Errorf("attach a png, jpg, or webp image, or reply to one with /image_edit")
+	return telegramImageRef{}, fmt.Errorf("attach a png, jpg, webp, or static sticker, or reply to one with /image_edit")
 }
 
 func currentTelegramImageRef(message *telego.Message, source string) (telegramImageRef, bool) {
@@ -193,6 +205,36 @@ func currentTelegramImageRef(message *telego.Message, source string) (telegramIm
 			FileName: message.Document.FileName,
 			Size:     int64(message.Document.FileSize),
 			Source:   "telegram:" + source + ":document",
+		}, true
+	}
+	if message.Sticker != nil {
+		if ref, ok := stickerImageRef(message.Sticker, source); ok {
+			return ref, true
+		}
+	}
+	return telegramImageRef{}, false
+}
+
+func stickerImageRef(sticker *telego.Sticker, source string) (telegramImageRef, bool) {
+	if sticker == nil {
+		return telegramImageRef{}, false
+	}
+	if !sticker.IsAnimated && !sticker.IsVideo {
+		return telegramImageRef{
+			FileID:   sticker.FileID,
+			MIME:     "image/webp",
+			FileName: "telegram-sticker.webp",
+			Size:     int64(sticker.FileSize),
+			Source:   "telegram:" + source + ":sticker",
+		}, true
+	}
+	if sticker.Thumbnail != nil {
+		return telegramImageRef{
+			FileID:   sticker.Thumbnail.FileID,
+			MIME:     "image/webp",
+			FileName: "telegram-sticker-preview.webp",
+			Size:     int64(sticker.Thumbnail.FileSize),
+			Source:   "telegram:" + source + ":sticker_preview",
 		}, true
 	}
 	return telegramImageRef{}, false

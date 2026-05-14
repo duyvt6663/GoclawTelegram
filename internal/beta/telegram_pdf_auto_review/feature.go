@@ -38,6 +38,9 @@ const (
 var (
 	captionModeRe  = regexp.MustCompile(`(?im)\bmode\s*[:=]\s*(harsh|collaborative|strict|constructive|mentor)\b`)
 	captionFocusRe = regexp.MustCompile(`(?im)^\s*focus\s*[:=]\s*(.+?)\s*$`)
+
+	activeFeatureMu sync.RWMutex
+	activeFeature   *TelegramPDFAutoReviewFeature
 )
 
 // TelegramPDFAutoReviewFeature reviews Telegram PDFs only when an agent
@@ -100,6 +103,23 @@ type ReprocessRequest struct {
 	ForceRefresh bool   `json:"force_refresh,omitempty"`
 }
 
+type LocalPDFProcessRequest struct {
+	SourcePath        string
+	OriginalFileName  string
+	MIMEType          string
+	CaptionText       string
+	Channel           string
+	ChatID            string
+	LocalKey          string
+	TelegramMessageID string
+	TelegramFileID    string
+	TelegramUniqueID  string
+	Mode              string
+	Focus             string
+	UserID            string
+	ForceRefresh      bool
+}
+
 type uploadProcessInput struct {
 	Upload       *uploadRecord
 	File         *fileCacheRecord
@@ -137,6 +157,26 @@ type uploadHandler struct {
 
 func (f *TelegramPDFAutoReviewFeature) Name() string { return featureName }
 
+func ActiveFeature() *TelegramPDFAutoReviewFeature {
+	activeFeatureMu.RLock()
+	defer activeFeatureMu.RUnlock()
+	return activeFeature
+}
+
+func setActiveFeature(feature *TelegramPDFAutoReviewFeature) {
+	activeFeatureMu.Lock()
+	defer activeFeatureMu.Unlock()
+	activeFeature = feature
+}
+
+func clearActiveFeature(feature *TelegramPDFAutoReviewFeature) {
+	activeFeatureMu.Lock()
+	defer activeFeatureMu.Unlock()
+	if activeFeature == feature {
+		activeFeature = nil
+	}
+}
+
 func (f *TelegramPDFAutoReviewFeature) Init(deps beta.Deps) error {
 	if deps.Stores == nil || deps.Stores.DB == nil {
 		return fmt.Errorf("%s requires a SQL store", featureName)
@@ -164,11 +204,13 @@ func (f *TelegramPDFAutoReviewFeature) Init(deps beta.Deps) error {
 		deps.Server.AddRouteRegistrar(&handler{feature: f})
 	}
 
+	setActiveFeature(f)
 	slog.Info("beta telegram PDF auto review initialized")
 	return nil
 }
 
 func (f *TelegramPDFAutoReviewFeature) Shutdown(ctx context.Context) error {
+	clearActiveFeature(f)
 	if f.cancel != nil {
 		f.cancel()
 	}
@@ -187,6 +229,28 @@ func (f *TelegramPDFAutoReviewFeature) Shutdown(ctx context.Context) error {
 	case <-time.After(5 * time.Second):
 		return fmt.Errorf("%s workers did not stop before timeout", featureName)
 	}
+}
+
+func (f *TelegramPDFAutoReviewFeature) ProcessLocalPDF(ctx context.Context, input LocalPDFProcessRequest) (*UploadResultPayload, error) {
+	if f == nil {
+		return nil, fmt.Errorf("%s is unavailable", featureName)
+	}
+	return f.processLocalPDF(ctx, localPDFProcessInput{
+		SourcePath:        input.SourcePath,
+		OriginalFileName:  input.OriginalFileName,
+		MIMEType:          input.MIMEType,
+		CaptionText:       input.CaptionText,
+		Channel:           input.Channel,
+		ChatID:            input.ChatID,
+		LocalKey:          input.LocalKey,
+		TelegramMessageID: input.TelegramMessageID,
+		TelegramFileID:    input.TelegramFileID,
+		TelegramUniqueID:  input.TelegramUniqueID,
+		Mode:              input.Mode,
+		Focus:             input.Focus,
+		UserID:            input.UserID,
+		ForceRefresh:      input.ForceRefresh,
+	})
 }
 
 func (h *uploadHandler) Name() string { return featureName }
@@ -1013,6 +1077,10 @@ func formatUploadResultForChat(payload *UploadResultPayload) string {
 		out.WriteString(strings.TrimSpace(payload.Review.Report))
 	}
 	return strings.TrimSpace(out.String())
+}
+
+func FormatUploadResultForChat(payload *UploadResultPayload) string {
+	return formatUploadResultForChat(payload)
 }
 
 func (p *UploadResultPayload) resolveTitle() string {

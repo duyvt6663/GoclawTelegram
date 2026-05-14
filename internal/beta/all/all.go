@@ -15,9 +15,12 @@ import (
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/linkup_web_search"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/lop_pho"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/lop_pho_poll_dedupe"
+	_ "github.com/nextlevelbuilder/goclaw/internal/beta/meme_replace"
+	_ "github.com/nextlevelbuilder/goclaw/internal/beta/pdf_url_auto_review"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/research_reviewer_codex"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/russian_roulette"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/shared_eatery_list"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/telegram_pdf_auto_review"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/topic_tool_routing"
+	_ "github.com/nextlevelbuilder/goclaw/internal/beta/zlibrary_mcp"
 )

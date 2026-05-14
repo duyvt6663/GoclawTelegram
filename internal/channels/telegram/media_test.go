@@ -1,10 +1,16 @@
 package telegram
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/mymmrac/telego"
+
+	"github.com/nextlevelbuilder/goclaw/internal/config"
 )
 
 // --- buildMediaTags tests ---
@@ -243,5 +249,85 @@ func TestLightweightTagForType_Sticker(t *testing.T) {
 	got := lightweightTagForType("sticker", msg)
 	if got != "[sent a sticker 😼 from set cat_pack]" {
 		t.Fatalf("lightweightTagForType(sticker) = %q", got)
+	}
+}
+
+func TestMediaDownloadMaxBytesCapsOfficialBotAPI(t *testing.T) {
+	channel := &Channel{
+		config: config.TelegramConfig{
+			MediaMaxBytes: 50 * 1024 * 1024,
+		},
+	}
+
+	if got := channel.MediaDownloadMaxBytes(); got != defaultMediaMaxBytes {
+		t.Fatalf("MediaDownloadMaxBytes() = %d, want %d", got, defaultMediaMaxBytes)
+	}
+}
+
+func TestMediaDownloadMaxBytesAllowsCustomAPIServerLimit(t *testing.T) {
+	want := int64(50 * 1024 * 1024)
+	channel := &Channel{
+		config: config.TelegramConfig{
+			APIServer:     "http://localhost:8081",
+			MediaMaxBytes: want,
+		},
+	}
+
+	if got := channel.MediaDownloadMaxBytes(); got != want {
+		t.Fatalf("MediaDownloadMaxBytes() = %d, want %d", got, want)
+	}
+}
+
+func TestLatestLargestProfilePhotoChoosesLargestLatestPhoto(t *testing.T) {
+	ref, ok := latestLargestProfilePhoto(&telego.UserProfilePhotos{
+		Photos: [][]telego.PhotoSize{{
+			{FileID: "small", Width: 160, Height: 160, FileSize: 100},
+			{FileID: "large", Width: 640, Height: 640, FileSize: 400},
+		}},
+	})
+	if !ok {
+		t.Fatal("latestLargestProfilePhoto() ok = false")
+	}
+	if ref.FileID != "large" {
+		t.Fatalf("FileID = %q, want large", ref.FileID)
+	}
+	if ref.FileSize != 400 {
+		t.Fatalf("FileSize = %d, want 400", ref.FileSize)
+	}
+}
+
+func TestLatestLargestProfilePhotoRejectsEmptyPhotos(t *testing.T) {
+	if _, ok := latestLargestProfilePhoto(&telego.UserProfilePhotos{}); ok {
+		t.Fatal("latestLargestProfilePhoto() ok = true, want false")
+	}
+}
+
+func TestDownloadMediaURLWithRetriesRetriesTransientFailure(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			http.Error(w, "temporary upstream failure", http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte("image bytes"))
+	}))
+	defer server.Close()
+
+	channel := &Channel{httpClient: server.Client()}
+	path, err := channel.downloadMediaURLWithRetries(context.Background(), server.URL+"/file.png", "photos/file.png", 1024, "file-id")
+	if err != nil {
+		t.Fatalf("downloadMediaURLWithRetries() error = %v", err)
+	}
+	defer os.Remove(path)
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read downloaded file: %v", err)
+	}
+	if string(data) != "image bytes" {
+		t.Fatalf("downloaded data = %q, want image bytes", string(data))
 	}
 }

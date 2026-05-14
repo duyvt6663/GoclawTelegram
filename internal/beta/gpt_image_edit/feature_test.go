@@ -2,6 +2,7 @@ package gptimageedit
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -12,11 +13,13 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/mymmrac/telego"
 
 	"github.com/nextlevelbuilder/goclaw/internal/beta/topicrouting"
 	"github.com/nextlevelbuilder/goclaw/internal/channels"
 	telegramchannel "github.com/nextlevelbuilder/goclaw/internal/channels/telegram"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	_ "modernc.org/sqlite"
 )
 
 func TestImageEditCommandEnabledForChannelRequiresExplicitToolAllow(t *testing.T) {
@@ -120,6 +123,147 @@ func TestResolveAllowedImagePathAllowsSymlinkedTempDir(t *testing.T) {
 	}
 }
 
+func TestImageRefFromTelegramMessageSupportsStaticSticker(t *testing.T) {
+	message := &telego.Message{
+		Sticker: &telego.Sticker{
+			FileID:   "sticker-file",
+			FileSize: 1234,
+		},
+	}
+
+	ref, err := imageRefFromTelegramMessage(message)
+	if err != nil {
+		t.Fatalf("imageRefFromTelegramMessage() error = %v", err)
+	}
+	if ref.FileID != "sticker-file" {
+		t.Fatalf("FileID = %q, want sticker-file", ref.FileID)
+	}
+	if ref.MIME != "image/webp" {
+		t.Fatalf("MIME = %q, want image/webp", ref.MIME)
+	}
+	if ref.FileName != "telegram-sticker.webp" {
+		t.Fatalf("FileName = %q, want telegram-sticker.webp", ref.FileName)
+	}
+	if ref.Source != "telegram:current_message:sticker" {
+		t.Fatalf("Source = %q, want sticker source", ref.Source)
+	}
+}
+
+func TestImageRefFromTelegramMessageUsesAnimatedStickerThumbnail(t *testing.T) {
+	message := &telego.Message{
+		Sticker: &telego.Sticker{
+			FileID:     "animated-sticker-file",
+			FileSize:   1234,
+			IsAnimated: true,
+			Thumbnail: &telego.PhotoSize{
+				FileID:   "thumb-file",
+				FileSize: 345,
+			},
+		},
+	}
+
+	ref, err := imageRefFromTelegramMessage(message)
+	if err != nil {
+		t.Fatalf("imageRefFromTelegramMessage() error = %v", err)
+	}
+	if ref.FileID != "thumb-file" {
+		t.Fatalf("FileID = %q, want thumbnail file", ref.FileID)
+	}
+	if ref.FileName != "telegram-sticker-preview.webp" {
+		t.Fatalf("FileName = %q, want preview file", ref.FileName)
+	}
+	if ref.Source != "telegram:current_message:sticker_preview" {
+		t.Fatalf("Source = %q, want sticker preview source", ref.Source)
+	}
+}
+
+func TestImageRefFromTelegramMessageSupportsReplyToSticker(t *testing.T) {
+	message := &telego.Message{
+		ReplyToMessage: &telego.Message{
+			Sticker: &telego.Sticker{
+				FileID:   "reply-sticker-file",
+				FileSize: 1234,
+			},
+		},
+	}
+
+	ref, err := imageRefFromTelegramMessage(message)
+	if err != nil {
+		t.Fatalf("imageRefFromTelegramMessage() error = %v", err)
+	}
+	if ref.FileID != "reply-sticker-file" {
+		t.Fatalf("FileID = %q, want reply sticker file", ref.FileID)
+	}
+	if ref.Source != "telegram:reply_to_message:sticker" {
+		t.Fatalf("Source = %q, want reply sticker source", ref.Source)
+	}
+}
+
+func TestImageRefFromTelegramMessageRejectsAnimatedStickerWithoutThumbnail(t *testing.T) {
+	_, err := imageRefFromTelegramMessage(&telego.Message{
+		Sticker: &telego.Sticker{
+			FileID:     "animated-sticker-file",
+			IsAnimated: true,
+		},
+	})
+	if err == nil {
+		t.Fatal("animated sticker without thumbnail should be rejected")
+	}
+	if !strings.Contains(err.Error(), "static sticker") {
+		t.Fatalf("error = %q, want static sticker guidance", err.Error())
+	}
+}
+
+func TestParseImageRefCommandArgsSupportsProfilePhotoMode(t *testing.T) {
+	got := parseImageRefCommandArgs("avatar phu")
+	if !got.profilePhoto {
+		t.Fatal("profilePhoto = false, want true")
+	}
+	if got.label != "phu" {
+		t.Fatalf("label = %q, want phu", got.label)
+	}
+
+	got = parseImageRefCommandArgs("face")
+	if got.profilePhoto {
+		t.Fatal("plain image ref should not force profile photo mode")
+	}
+	if got.label != "face" {
+		t.Fatalf("label = %q, want face", got.label)
+	}
+}
+
+func TestProfilePhotoUserFromTelegramMessageUsesReplyAuthor(t *testing.T) {
+	message := &telego.Message{
+		From: &telego.User{ID: 1, FirstName: "sender"},
+		ReplyToMessage: &telego.Message{
+			From: &telego.User{ID: 2, FirstName: "target"},
+		},
+	}
+	user := profilePhotoUserFromTelegramMessage(message)
+	if user == nil {
+		t.Fatal("profilePhotoUserFromTelegramMessage() returned nil")
+	}
+	if user.ID != 2 {
+		t.Fatalf("user.ID = %d, want reply author 2", user.ID)
+	}
+}
+
+func TestProfilePhotoUserFromTelegramMessageSkipsBots(t *testing.T) {
+	message := &telego.Message{
+		From: &telego.User{ID: 1, FirstName: "sender"},
+		ReplyToMessage: &telego.Message{
+			From: &telego.User{ID: 2, FirstName: "bot", IsBot: true},
+		},
+	}
+	user := profilePhotoUserFromTelegramMessage(message)
+	if user == nil {
+		t.Fatal("profilePhotoUserFromTelegramMessage() returned nil")
+	}
+	if user.ID != 1 {
+		t.Fatalf("user.ID = %d, want sender fallback 1", user.ID)
+	}
+}
+
 func TestNormalizeEditRequestSupportsCoreEditTypes(t *testing.T) {
 	cases := map[string]string{
 		"object_removal":    "remove_object",
@@ -213,12 +357,12 @@ func TestCallOpenAIEditUsesOfficialMultipartFields(t *testing.T) {
 				apiKey:  "test-key",
 				apiBase: server.URL,
 			}
-			output, statusCode, err := feature.callOpenAIEditOnce(context.Background(), &imageInput{
+			output, statusCode, err := feature.callOpenAIEditOnce(context.Background(), []*imageInput{{
 				Data:     []byte("input image"),
 				MIME:     "image/png",
 				FileName: "input.png",
 				Size:     int64(len("input image")),
-			}, EditRequest{
+			}}, EditRequest{
 				Prompt:       "remove the icons",
 				OutputFormat: tc.outputFormat,
 			})
@@ -235,11 +379,152 @@ func TestCallOpenAIEditUsesOfficialMultipartFields(t *testing.T) {
 	}
 }
 
+func TestCallOpenAIEditUsesImageArrayForMultipleInputs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(maxImageBytes); err != nil {
+			t.Errorf("ParseMultipartForm() error = %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		assertFormValue(t, r, "model", defaultModel)
+		assertFormValue(t, r, "prompt", "combine refs")
+		if got := len(r.MultipartForm.File["image"]); got != 0 {
+			t.Errorf("multipart image file count = %d, want 0", got)
+		}
+		files := r.MultipartForm.File["image[]"]
+		if got := len(files); got != 2 {
+			t.Fatalf("multipart image[] file count = %d, want 2", got)
+		}
+		if got := files[0].Header.Get("Content-Type"); got != "image/png" {
+			t.Errorf("first image Content-Type = %q, want image/png", got)
+		}
+		if got := files[1].Header.Get("Content-Type"); got != "image/webp" {
+			t.Errorf("second image Content-Type = %q, want image/webp", got)
+		}
+		fmt.Fprintf(w, `{"data":[{"b64_json":%q}]}`, base64.StdEncoding.EncodeToString([]byte("generated image")))
+	}))
+	defer server.Close()
+
+	feature := &GPTImageEditFeature{
+		apiKey:  "test-key",
+		apiBase: server.URL,
+	}
+	output, statusCode, err := feature.callOpenAIEditOnce(context.Background(), []*imageInput{
+		{
+			Data:     []byte("primary"),
+			MIME:     "image/png",
+			FileName: "primary.png",
+			Size:     int64(len("primary")),
+		},
+		{
+			Data:     []byte("style"),
+			MIME:     "image/webp",
+			FileName: "style.webp",
+			Size:     int64(len("style")),
+		},
+	}, EditRequest{Prompt: "combine refs"})
+	if err != nil {
+		t.Fatalf("callOpenAIEditOnce() error = %v", err)
+	}
+	if statusCode != http.StatusOK {
+		t.Fatalf("statusCode = %d, want 200", statusCode)
+	}
+	if string(output.Data) != "generated image" {
+		t.Fatalf("output data = %q, want generated image", string(output.Data))
+	}
+}
+
+func TestParseImageRefGenerationPrompt(t *testing.T) {
+	labels, prompt, ok := parseImageRefGenerationPrompt("using face, hair_style: cho bác mọc thêm tóc")
+	if !ok {
+		t.Fatal("parseImageRefGenerationPrompt() ok = false")
+	}
+	if got, want := strings.Join(labels, ","), "face,hair_style"; got != want {
+		t.Fatalf("labels = %q, want %q", got, want)
+	}
+	if prompt != "cho bác mọc thêm tóc" {
+		t.Fatalf("prompt = %q", prompt)
+	}
+
+	if _, _, ok := parseImageRefGenerationPrompt("make this sticker realistic"); ok {
+		t.Fatal("parseImageRefGenerationPrompt() should only accept explicit using syntax")
+	}
+}
+
+func TestParseImageGenerationPromptSupportsDirectMediaPrompt(t *testing.T) {
+	labels, prompt, ok := parseImageGenerationPrompt("make this sticker realistic")
+	if !ok {
+		t.Fatal("parseImageGenerationPrompt() ok = false")
+	}
+	if len(labels) != 0 {
+		t.Fatalf("labels = %v, want none", labels)
+	}
+	if prompt != "make this sticker realistic" {
+		t.Fatalf("prompt = %q", prompt)
+	}
+}
+
+func TestImageGenMessageRefsSupportsReplySticker(t *testing.T) {
+	refs := imageGenMessageRefs(&telego.Message{
+		ReplyToMessage: &telego.Message{
+			Sticker: &telego.Sticker{
+				FileID:   "reply-sticker-file",
+				FileSize: 1234,
+			},
+		},
+	})
+	if len(refs) != 1 {
+		t.Fatalf("len(refs) = %d, want 1", len(refs))
+	}
+	if refs[0].FileID != "reply-sticker-file" {
+		t.Fatalf("FileID = %q, want reply-sticker-file", refs[0].FileID)
+	}
+	if refs[0].MIME != "image/webp" {
+		t.Fatalf("MIME = %q, want image/webp", refs[0].MIME)
+	}
+}
+
+func TestImageReferenceStoreReturnsRequestedOrder(t *testing.T) {
+	store := newTestImageFeatureStore(t)
+	scope := telegramRefScope{tenantID: uuid.NewString(), chatID: "-100123", threadID: 42}
+	for _, ref := range []imageReference{
+		{TenantID: scope.tenantID, ChatID: scope.chatID, ThreadID: scope.threadID, Label: "face", FileID: "face-file", MIME: "image/jpeg", FileName: "face.jpg"},
+		{TenantID: scope.tenantID, ChatID: scope.chatID, ThreadID: scope.threadID, Label: "style", FileID: "style-file", MIME: "image/webp", FileName: "style.webp"},
+	} {
+		if err := store.upsertImageRef(&ref); err != nil {
+			t.Fatalf("upsertImageRef(%s): %v", ref.Label, err)
+		}
+	}
+
+	refs, err := store.getImageRefsByLabels(scope.tenantID, scope.chatID, scope.threadID, []string{"style", "face"})
+	if err != nil {
+		t.Fatalf("getImageRefsByLabels() error = %v", err)
+	}
+	if got, want := refs[0].Label+","+refs[1].Label, "style,face"; got != want {
+		t.Fatalf("ref order = %q, want %q", got, want)
+	}
+}
+
 func assertFormValue(t *testing.T, r *http.Request, key, want string) {
 	t.Helper()
 	if got := r.FormValue(key); got != want {
 		t.Errorf("form %s = %q, want %q", key, got, want)
 	}
+}
+
+func newTestImageFeatureStore(t *testing.T) *featureStore {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "gpt-image-edit.db")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := &featureStore{db: db}
+	if err := store.migrate(); err != nil {
+		t.Fatalf("migrate feature store: %v", err)
+	}
+	return store
 }
 
 func assertNoFormValue(t *testing.T, r *http.Request, key string) {

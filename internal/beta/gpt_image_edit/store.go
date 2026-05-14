@@ -2,6 +2,7 @@ package gptimageedit
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,6 +35,22 @@ type featureStore struct {
 	db *sql.DB
 }
 
+type imageReference struct {
+	ID        string    `json:"id"`
+	TenantID  string    `json:"tenant_id"`
+	ChatID    string    `json:"chat_id"`
+	ThreadID  int       `json:"thread_id"`
+	OwnerID   string    `json:"owner_id,omitempty"`
+	Label     string    `json:"label"`
+	FileID    string    `json:"file_id"`
+	MIME      string    `json:"mime"`
+	FileName  string    `json:"file_name"`
+	FileSize  int64     `json:"file_size"`
+	Source    string    `json:"source"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
 func (s *featureStore) migrate() error {
 	stmts := []string{
 		`
@@ -56,6 +73,25 @@ func (s *featureStore) migrate() error {
 		)
 		`,
 		`CREATE INDEX IF NOT EXISTS idx_beta_gpt_image_edit_runs_lookup ON beta_gpt_image_edit_runs(tenant_id, created_at DESC)`,
+		`
+		CREATE TABLE IF NOT EXISTS beta_gpt_image_edit_refs (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL DEFAULT '',
+			chat_id TEXT NOT NULL DEFAULT '',
+			thread_id INTEGER NOT NULL DEFAULT 0,
+			owner_id TEXT NOT NULL DEFAULT '',
+			label TEXT NOT NULL DEFAULT '',
+			file_id TEXT NOT NULL DEFAULT '',
+			mime TEXT NOT NULL DEFAULT '',
+			file_name TEXT NOT NULL DEFAULT '',
+			file_size INTEGER NOT NULL DEFAULT 0,
+			source TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(tenant_id, chat_id, thread_id, label)
+		)
+		`,
+		`CREATE INDEX IF NOT EXISTS idx_beta_gpt_image_edit_refs_lookup ON beta_gpt_image_edit_refs(tenant_id, chat_id, thread_id, updated_at DESC)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -63,6 +99,122 @@ func (s *featureStore) migrate() error {
 		}
 	}
 	return nil
+}
+
+func (s *featureStore) upsertImageRef(record *imageReference) error {
+	if record == nil {
+		return nil
+	}
+	if record.ID == "" {
+		record.ID = uuid.NewString()
+	}
+	now := time.Now().UTC()
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = now
+	}
+	record.UpdatedAt = now
+
+	_, err := s.db.Exec(`
+		INSERT INTO beta_gpt_image_edit_refs (
+			id, tenant_id, chat_id, thread_id, owner_id, label, file_id, mime,
+			file_name, file_size, source, created_at, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		ON CONFLICT(tenant_id, chat_id, thread_id, label) DO UPDATE SET
+			owner_id=excluded.owner_id,
+			file_id=excluded.file_id,
+			mime=excluded.mime,
+			file_name=excluded.file_name,
+			file_size=excluded.file_size,
+			source=excluded.source,
+			updated_at=excluded.updated_at`,
+		record.ID,
+		record.TenantID,
+		record.ChatID,
+		record.ThreadID,
+		record.OwnerID,
+		record.Label,
+		record.FileID,
+		record.MIME,
+		record.FileName,
+		record.FileSize,
+		record.Source,
+		record.CreatedAt,
+		record.UpdatedAt,
+	)
+	return err
+}
+
+func (s *featureStore) listImageRefs(tenantID, chatID string, threadID int, limit int) ([]imageReference, error) {
+	if limit <= 0 || limit > 100 {
+		limit = maxInputImages
+	}
+	rows, err := s.db.Query(`
+		SELECT id, tenant_id, chat_id, thread_id, owner_id, label, file_id, mime,
+		       file_name, file_size, source, created_at, updated_at
+		FROM beta_gpt_image_edit_refs
+		WHERE tenant_id=$1 AND chat_id=$2 AND thread_id=$3
+		ORDER BY updated_at DESC
+		LIMIT $4`, tenantID, chatID, threadID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var refs []imageReference
+	for rows.Next() {
+		var ref imageReference
+		if err := rows.Scan(
+			&ref.ID,
+			&ref.TenantID,
+			&ref.ChatID,
+			&ref.ThreadID,
+			&ref.OwnerID,
+			&ref.Label,
+			&ref.FileID,
+			&ref.MIME,
+			&ref.FileName,
+			&ref.FileSize,
+			&ref.Source,
+			&ref.CreatedAt,
+			&ref.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+func (s *featureStore) getImageRefsByLabels(tenantID, chatID string, threadID int, labels []string) ([]imageReference, error) {
+	labels = normalizeImageRefLabels(labels)
+	if len(labels) == 0 {
+		return nil, nil
+	}
+	all, err := s.listImageRefs(tenantID, chatID, threadID, 100)
+	if err != nil {
+		return nil, err
+	}
+	byLabel := make(map[string]imageReference, len(all))
+	for _, ref := range all {
+		byLabel[strings.ToLower(ref.Label)] = ref
+	}
+	out := make([]imageReference, 0, len(labels))
+	for _, label := range labels {
+		ref, ok := byLabel[strings.ToLower(label)]
+		if !ok {
+			return nil, sql.ErrNoRows
+		}
+		out = append(out, ref)
+	}
+	return out, nil
+}
+
+func (s *featureStore) clearImageRefs(tenantID, chatID string, threadID int) error {
+	_, err := s.db.Exec(`
+		DELETE FROM beta_gpt_image_edit_refs
+		WHERE tenant_id=$1 AND chat_id=$2 AND thread_id=$3`, tenantID, chatID, threadID)
+	return err
 }
 
 func (s *featureStore) insertRun(record *runRecord) error {

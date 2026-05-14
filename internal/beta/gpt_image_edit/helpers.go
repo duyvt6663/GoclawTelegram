@@ -29,8 +29,11 @@ func normalizeEditRequest(request EditRequest) (EditRequest, error) {
 	request.Operation = normalizeOperation(request.Operation)
 	request.OutputFormat = normalizeOutputFormat(request.OutputFormat)
 	request.ImagePath = strings.TrimSpace(request.ImagePath)
+	request.ImagePaths = compactStringsPreserveOrder(request.ImagePaths)
 	request.ImageBase64 = strings.TrimSpace(request.ImageBase64)
+	request.ImageBase64s = compactStringsPreserveOrder(request.ImageBase64s)
 	request.ImageMIME = strings.TrimSpace(request.ImageMIME)
+	request.ImageMIMEs = compactStringsPreserveOrder(request.ImageMIMEs)
 	request.Size = strings.TrimSpace(request.Size)
 	request.Quality = normalizeQuality(request.Quality)
 	request.Source = strings.TrimSpace(request.Source)
@@ -82,33 +85,104 @@ func normalizeQuality(value string) string {
 	}
 }
 
-func (f *GPTImageEditFeature) resolveImageInput(ctx context.Context, request EditRequest) (*imageInput, error) {
+func (f *GPTImageEditFeature) resolveImageInputs(ctx context.Context, request EditRequest) ([]*imageInput, error) {
+	inputs := make([]*imageInput, 0, 1+len(request.ImagePaths)+len(request.ImageBase64s))
 	if request.ImagePath != "" {
-		return f.loadImageFromPath(ctx, request.ImagePath, request.ImageMIME, request.Source)
+		input, err := f.loadImageFromPath(ctx, request.ImagePath, request.ImageMIME, request.Source)
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, input)
+	}
+	for _, path := range request.ImagePaths {
+		mimeHint := request.ImageMIME
+		pathIndex := len(inputs)
+		if pathIndex < len(request.ImageMIMEs) && strings.TrimSpace(request.ImageMIMEs[pathIndex]) != "" {
+			mimeHint = request.ImageMIMEs[pathIndex]
+		}
+		input, err := f.loadImageFromPath(ctx, path, mimeHint, request.Source)
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, input)
 	}
 	if request.ImageBase64 != "" {
 		data, err := decodeBase64Image(request.ImageBase64)
 		if err != nil {
 			return nil, err
 		}
-		return validateImageData(data, request.ImageMIME, "input."+extensionForMIME(request.ImageMIME), sourceOrDefault(request.Source, "base64"))
+		input, err := validateImageData(data, request.ImageMIME, "input."+extensionForMIME(request.ImageMIME), sourceOrDefault(request.Source, "base64"))
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, input)
+	}
+	for i, value := range request.ImageBase64s {
+		data, err := decodeBase64Image(value)
+		if err != nil {
+			return nil, err
+		}
+		mimeHint := request.ImageMIME
+		if i < len(request.ImageMIMEs) && strings.TrimSpace(request.ImageMIMEs[i]) != "" {
+			mimeHint = request.ImageMIMEs[i]
+		}
+		input, err := validateImageData(data, mimeHint, fmt.Sprintf("input-%d.%s", i+1, extensionForMIME(mimeHint)), sourceOrDefault(request.Source, "base64"))
+		if err != nil {
+			return nil, err
+		}
+		inputs = append(inputs, input)
+	}
+	if len(inputs) > maxInputImages {
+		return nil, fmt.Errorf("too many input images (%d max)", maxInputImages)
+	}
+	if len(inputs) > 0 {
+		return inputs, nil
 	}
 	if paths := tools.RunMediaPathsFromCtx(ctx); len(paths) > 0 {
 		for _, path := range paths {
 			input, err := f.loadImageFromPath(ctx, path, "", sourceOrDefault(request.Source, "chat_attachment"))
 			if err == nil {
-				return input, nil
+				inputs = append(inputs, input)
+				if len(inputs) == maxInputImages {
+					break
+				}
 			}
+		}
+		if len(inputs) > 0 {
+			return inputs, nil
 		}
 	}
 	if images := tools.MediaImagesFromCtx(ctx); len(images) > 0 {
-		data, err := decodeBase64Image(images[len(images)-1].Data)
-		if err != nil {
-			return nil, err
+		start := 0
+		if len(images) > maxInputImages {
+			start = len(images) - maxInputImages
 		}
-		return validateImageData(data, images[len(images)-1].MimeType, "chat-image."+extensionForMIME(images[len(images)-1].MimeType), sourceOrDefault(request.Source, "chat_attachment"))
+		for i, image := range images[start:] {
+			data, err := decodeBase64Image(image.Data)
+			if err != nil {
+				continue
+			}
+			input, err := validateImageData(data, image.MimeType, fmt.Sprintf("chat-image-%d.%s", i+1, extensionForMIME(image.MimeType)), sourceOrDefault(request.Source, "chat_attachment"))
+			if err == nil {
+				inputs = append(inputs, input)
+			}
+		}
+		if len(inputs) > 0 {
+			return inputs, nil
+		}
 	}
-	return nil, fmt.Errorf("no editable image found; attach a png, jpg, or webp image or pass image_path/image_base64")
+	return nil, fmt.Errorf("no editable image found; attach a png, jpg, or webp image, save refs with /image_ref, or pass image_path/image_base64")
+}
+
+func (f *GPTImageEditFeature) resolveImageInput(ctx context.Context, request EditRequest) (*imageInput, error) {
+	inputs, err := f.resolveImageInputs(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("no editable image found; attach a png, jpg, or webp image or pass image_path/image_base64")
+	}
+	return inputs[0], nil
 }
 
 func (f *GPTImageEditFeature) loadImageFromPath(ctx context.Context, rawPath, mimeHint, source string) (*imageInput, error) {
@@ -198,6 +272,45 @@ func validateImageData(data []byte, mimeHint, fileName, source string) (*imageIn
 		Source:   sourceOrDefault(source, fileName),
 		Size:     int64(len(data)),
 	}, nil
+}
+
+func compactStringsPreserveOrder(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func summarizeImageInputs(inputs []*imageInput) (string, string, int64) {
+	if len(inputs) == 0 {
+		return "", "", 0
+	}
+	sources := make([]string, 0, len(inputs))
+	mimes := make([]string, 0, len(inputs))
+	var total int64
+	for _, input := range inputs {
+		if input == nil {
+			continue
+		}
+		if input.Source != "" {
+			sources = append(sources, input.Source)
+		}
+		if input.MIME != "" {
+			mimes = append(mimes, input.MIME)
+		}
+		total += input.Size
+	}
+	return trimForStorage(strings.Join(sources, ","), 1200), trimForStorage(strings.Join(mimes, ","), 600), total
 }
 
 func normalizeImageMIME(mimeHint, fileName string, data []byte) string {

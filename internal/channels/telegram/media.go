@@ -215,7 +215,64 @@ func (c *Channel) mediaMaxBytes() int64 {
 			maxBytes = defaultMediaMaxBytes
 		}
 	}
+	if c.config.APIServer == "" && maxBytes > defaultMediaMaxBytes {
+		maxBytes = defaultMediaMaxBytes
+	}
 	return maxBytes
+}
+
+// MediaDownloadMaxBytes returns the effective inbound Telegram download limit.
+func (c *Channel) MediaDownloadMaxBytes() int64 {
+	return c.mediaMaxBytes()
+}
+
+// ProfilePhotoRef is a downloadable Telegram profile photo reference.
+type ProfilePhotoRef struct {
+	FileID   string
+	FileSize int64
+}
+
+// LatestUserProfilePhotoRef returns the latest, largest profile photo available
+// to the bot for a Telegram user.
+func (c *Channel) LatestUserProfilePhotoRef(ctx context.Context, userID int64) (ProfilePhotoRef, error) {
+	if c == nil || c.bot == nil {
+		return ProfilePhotoRef{}, fmt.Errorf("telegram bot is unavailable")
+	}
+	if userID == 0 {
+		return ProfilePhotoRef{}, fmt.Errorf("user_id is required")
+	}
+	photos, err := c.bot.GetUserProfilePhotos(ctx, &telego.GetUserProfilePhotosParams{
+		UserID: userID,
+		Limit:  1,
+	})
+	if err != nil {
+		return ProfilePhotoRef{}, err
+	}
+	ref, ok := latestLargestProfilePhoto(photos)
+	if !ok {
+		return ProfilePhotoRef{}, fmt.Errorf("user has no accessible profile photo")
+	}
+	return ref, nil
+}
+
+func latestLargestProfilePhoto(photos *telego.UserProfilePhotos) (ProfilePhotoRef, bool) {
+	if photos == nil || len(photos.Photos) == 0 || len(photos.Photos[0]) == 0 {
+		return ProfilePhotoRef{}, false
+	}
+	best := photos.Photos[0][0]
+	for _, candidate := range photos.Photos[0][1:] {
+		if candidate.FileSize > best.FileSize ||
+			(candidate.FileSize == best.FileSize && candidate.Width*candidate.Height > best.Width*best.Height) {
+			best = candidate
+		}
+	}
+	if best.FileID == "" {
+		return ProfilePhotoRef{}, false
+	}
+	return ProfilePhotoRef{
+		FileID:   best.FileID,
+		FileSize: int64(best.FileSize),
+	}, true
 }
 
 // DownloadMediaByFileID downloads a Telegram file into a temporary local path.
@@ -477,6 +534,31 @@ func (c *Channel) downloadMedia(ctx context.Context, fileID string, maxBytes int
 		}
 	}
 
+	return c.downloadMediaURLWithRetries(ctx, downloadURL, file.FilePath, maxBytes, fileID)
+}
+
+func (c *Channel) downloadMediaURLWithRetries(ctx context.Context, downloadURL, telegramPath string, maxBytes int64, fileID string) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= downloadMaxRetries; attempt++ {
+		path, err := c.downloadMediaURL(ctx, downloadURL, telegramPath, maxBytes)
+		if err == nil {
+			return path, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil || !shouldRetryMediaDownload(err) || attempt == downloadMaxRetries {
+			break
+		}
+		slog.Debug("retrying media file download", "file_id", fileID, "attempt", attempt, "error", err)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(time.Duration(attempt) * time.Second):
+		}
+	}
+	return "", lastErr
+}
+
+func (c *Channel) downloadMediaURL(ctx context.Context, downloadURL, telegramPath string, maxBytes int64) (string, error) {
 	// Use a generous timeout for media downloads (large files via local Bot API
 	// can be up to 200 MB). The shared httpClient has a 30s timeout suited for
 	// API calls, so we override per-request with a dedicated context.
@@ -504,7 +586,7 @@ func (c *Channel) downloadMedia(ctx context.Context, fileID string, maxBytes int
 	}
 
 	// Determine extension from file path
-	ext := filepath.Ext(file.FilePath)
+	ext := filepath.Ext(telegramPath)
 	if ext == "" {
 		ext = ".bin"
 	}
@@ -531,6 +613,13 @@ func (c *Channel) downloadMedia(ctx context.Context, fileID string, maxBytes int
 	}
 
 	return tmpFile.Name(), nil
+}
+
+func shouldRetryMediaDownload(err error) bool {
+	if err == nil {
+		return false
+	}
+	return !errors.Is(err, errMediaTooLarge)
 }
 
 // copyLocalFile copies a file from the local Bot API data directory to a temp file.
