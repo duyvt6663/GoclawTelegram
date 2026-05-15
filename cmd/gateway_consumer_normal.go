@@ -80,22 +80,7 @@ func processNormalMessage(
 		}
 	}
 
-	// Group-scoped UserID: context files, memory, traces, and seeding scope.
-	// - Discord guilds: "guild:{guildID}:user:{senderID}" — per-user per-server,
-	//   shared across all channels within the same server. Session key stays per-channel.
-	// - Other platforms: "group:{channel}:{chatID}" — shared by all users in the chat.
-	// Individual senderID is preserved in InboundMessage for pairing/dedup/mention gate.
-	userID := msg.UserID
-	if peerKind == string(sessions.PeerGroup) && msg.ChatID != "" {
-		if guildID := msg.Metadata["guild_id"]; guildID != "" && msg.SenderID != "" {
-			// Discord guild: per-user scope so each member has own profile
-			// across all channels in the same server.
-			userID = fmt.Sprintf("guild:%s:user:%s", guildID, msg.SenderID)
-		} else {
-			groupID := msg.ChatID
-			userID = fmt.Sprintf("group:%s:%s", msg.Channel, groupID)
-		}
-	}
+	userID := resolveInboundUserID(msg, peerKind)
 
 	// Persist friendly names from channel metadata into session + user profile.
 	sessionMeta := extractSessionMetadata(msg, peerKind)
@@ -476,4 +461,23 @@ func processNormalMessage(
 			go autoSetFollowup(ctx, deps.TeamStore, deps.AgentStore, agentKey, channel, chatID, replyContent)
 		}
 	}(agentID, msg.Channel, msg.ChatID, sessionKey, runID, peerKind, msg.Content, outMeta, blockReply, ptd)
+}
+
+func resolveInboundUserID(msg bus.InboundMessage, peerKind string) string {
+	userID := strings.TrimSpace(msg.UserID)
+	if msg.Metadata["skynet_workflow"] == "true" {
+		return userID
+	}
+	// Group-scoped UserID: context files, memory, traces, and seeding scope.
+	// - Discord guilds: "guild:{guildID}:user:{senderID}" — per-user per-server,
+	//   shared across all channels within the same server. Session key stays per-channel.
+	// - Other platforms: "group:{channel}:{chatID}" — shared by all users in the chat.
+	// Individual senderID is preserved in InboundMessage for pairing/dedup/mention gate.
+	if peerKind == string(sessions.PeerGroup) && msg.ChatID != "" {
+		if guildID := msg.Metadata["guild_id"]; guildID != "" && msg.SenderID != "" {
+			return fmt.Sprintf("guild:%s:user:%s", guildID, msg.SenderID)
+		}
+		return fmt.Sprintf("group:%s:%s", msg.Channel, msg.ChatID)
+	}
+	return userID
 }

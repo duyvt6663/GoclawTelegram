@@ -48,7 +48,11 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 			agentID = config.NormalizeAgentID(agentID)
 		}
 
-		sessionKey := sessions.BuildCronSessionKey(agentID, job.ID)
+		baseSessionKey := sessions.BuildCronSessionKey(agentID, job.ID)
+		sessionKey := baseSessionKey
+		if job.Stateless {
+			sessionKey = fmt.Sprintf("%s:run:%s", baseSessionKey, uuid.NewString())
+		}
 		channel := job.DeliverChannel
 		if channel == "" {
 			channel = "cron"
@@ -81,13 +85,12 @@ func makeCronJobHandler(sched *scheduler.Scheduler, msgBus *bus.MessageBus, cfg 
 		// Build context with tenant scope so agent loop events are scoped correctly.
 		cronCtx := store.WithTenantID(context.Background(), job.TenantID)
 
-		// Reset session before each cron run to prevent tool errors from previous
-		// runs from polluting the context and blocking future executions (#294).
-		// Save() persists the empty session to DB so stale data won't reload after restart.
-		// Stateless jobs skip this — they intentionally carry no session history.
-		if !job.Stateless {
-			sessionMgr.Reset(cronCtx, sessionKey)
-			sessionMgr.Save(cronCtx, sessionKey)
+		// Stateless jobs must start from a clean session on every tick. This
+		// prevents stale tool errors or old no-op responses from steering future
+		// runs, and matches the UI contract: "each run starts fresh".
+		if job.Stateless {
+			sessionMgr.Reset(cronCtx, baseSessionKey)
+			sessionMgr.Save(cronCtx, baseSessionKey)
 		}
 
 		// Schedule through cron lane — scheduler handles agent resolution and concurrency

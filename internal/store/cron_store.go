@@ -85,6 +85,7 @@ type CronJobResult struct {
 type CronJobPatch struct {
 	Name           string        `json:"name,omitempty"`
 	AgentID        *string       `json:"agentId,omitempty"`
+	UserID         *string       `json:"userId,omitempty"`
 	Enabled        *bool         `json:"enabled,omitempty"`
 	Schedule       *CronSchedule `json:"schedule,omitempty"`
 	Message        string        `json:"message,omitempty"`

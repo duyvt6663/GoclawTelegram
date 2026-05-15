@@ -20,6 +20,7 @@ import (
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/research_reviewer_codex"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/russian_roulette"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/shared_eatery_list"
+	_ "github.com/nextlevelbuilder/goclaw/internal/beta/skynet_workflows"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/telegram_pdf_auto_review"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/topic_tool_routing"
 	_ "github.com/nextlevelbuilder/goclaw/internal/beta/zlibrary_mcp"

@@ -264,6 +264,13 @@ func (s *SQLiteCronStore) UpdateJob(ctx context.Context, jobID string, patch sto
 			updates["agent_id"] = aid
 		}
 	}
+	if patch.UserID != nil {
+		if *patch.UserID == "" {
+			updates["user_id"] = nil
+		} else {
+			updates["user_id"] = *patch.UserID
+		}
+	}
 
 	if patch.Schedule != nil {
 		merged := store.MergeCronSchedule(current.Schedule, patch.Schedule)
@@ -395,7 +402,6 @@ func (s *SQLiteCronStore) lockCronJobForMutation(ctx context.Context, tx *sql.Tx
 	return &state, nil
 }
 
-
 func execCronJobUpdateTx(ctx context.Context, tx *sql.Tx, id uuid.UUID, updates map[string]any) error {
 	if len(updates) == 0 {
 		return nil
@@ -433,4 +439,3 @@ func execCronJobUpdateTx(ctx context.Context, tx *sql.Tx, id uuid.UUID, updates 
 	}
 	return nil
 }
-
