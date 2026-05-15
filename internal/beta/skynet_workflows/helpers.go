@@ -89,6 +89,24 @@ func uniqueSorted(values []string) []string {
 	return values
 }
 
+func partitionRefinementItems(items []string) ([]string, []string) {
+	var backlogItems []string
+	var experimentItems []string
+	for _, item := range uniqueNonEmpty(items) {
+		if isExperimentRefinementItem(item) {
+			experimentItems = append(experimentItems, item)
+			continue
+		}
+		backlogItems = append(backlogItems, item)
+	}
+	return backlogItems, experimentItems
+}
+
+func isExperimentRefinementItem(item string) bool {
+	lower := strings.ToLower(strings.TrimSpace(item))
+	return strings.HasPrefix(lower, "experiment leaf:") || strings.HasPrefix(lower, "experiment:")
+}
+
 func tenantKeyFromCtx(ctxTenant uuid.UUID) string {
 	if ctxTenant == uuid.Nil {
 		return storepkg.MasterTenantID.String()
@@ -127,6 +145,52 @@ func intArg(args map[string]any, key string) int {
 	default:
 		return 0
 	}
+}
+
+func boolArg(args map[string]any, key string) bool {
+	switch value := args[key].(type) {
+	case bool:
+		return value
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "true", "yes", "y", "on":
+			return true
+		}
+	}
+	return false
+}
+
+func stringSliceArg(args map[string]any, keys ...string) []string {
+	for _, key := range keys {
+		switch value := args[key].(type) {
+		case []string:
+			return uniqueNonEmpty(value)
+		case []any:
+			out := make([]string, 0, len(value))
+			for _, item := range value {
+				if text, ok := item.(string); ok {
+					out = append(out, text)
+				}
+			}
+			return uniqueNonEmpty(out)
+		case string:
+			parts := strings.FieldsFunc(value, func(r rune) bool {
+				return r == ',' || r == '\n' || r == ' '
+			})
+			return uniqueNonEmpty(parts)
+		}
+	}
+	return nil
+}
+
+func itemIDsArg(args map[string]any) []string {
+	ids := stringSliceArg(args, "item_ids", "ids")
+	if len(ids) == 0 {
+		if id := stringArg(args, "item_id"); id != "" {
+			ids = []string{id}
+		}
+	}
+	return ids
 }
 
 func boolPtr(value bool) *bool {

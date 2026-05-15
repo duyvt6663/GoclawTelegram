@@ -8,6 +8,7 @@ import (
 
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	storepkg "github.com/nextlevelbuilder/goclaw/internal/store"
+	toolspkg "github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
 func TestBacklogRefineCreatesChildItemsAndMarksParent(t *testing.T) {
@@ -62,6 +63,72 @@ func TestBacklogRefineCreatesChildItemsAndMarksParent(t *testing.T) {
 		if child.Metadata["parent_item"] != parent.ID {
 			t.Fatalf("child missing parent metadata: %#v", child.Metadata)
 		}
+	}
+}
+
+func TestBacklogRefineRoutesExperimentLeafToExperimentQueue(t *testing.T) {
+	store := newTestFeatureStore(t)
+	tenantID := storepkg.MasterTenantID.String()
+	parentItems, err := store.addItems(tenantID, kindBacklog, []string{"Plan writing question stack rollout"}, workflowOrigin{}, "repo-backlog:rollup", map[string]string{
+		"source_path": "backlog/01-mvp-platform.md",
+		"source_line": "86",
+	})
+	if err != nil {
+		t.Fatalf("addItems: %v", err)
+	}
+	parent := parentItems[0]
+
+	tool := &boardTool{
+		feature: &SkynetWorkflowsFeature{store: store},
+		name:    "skynet_backlog",
+		kind:    kindBacklog,
+	}
+	result := tool.Execute(context.Background(), map[string]any{
+		"action":  "refine",
+		"item_id": parent.ID,
+		"result":  "Split implementation and experiment validation paths.",
+		"text":    "- Experiment leaf: validate apps/web/experiments/w2-question-stack\n- Add writing stage schema support",
+	})
+	if result.IsError {
+		t.Fatalf("refine returned error: %s", result.ForLLM)
+	}
+
+	backlogChildren, err := store.listItems(tenantID, kindBacklog, statusPending, 10)
+	if err != nil {
+		t.Fatalf("list backlog children: %v", err)
+	}
+	if len(backlogChildren) != 1 {
+		t.Fatalf("backlog children = %d, want 1: %#v", len(backlogChildren), backlogChildren)
+	}
+	experimentChildren, err := store.listItems(tenantID, kindExperiment, statusPending, 10)
+	if err != nil {
+		t.Fatalf("list experiment children: %v", err)
+	}
+	if len(experimentChildren) != 1 {
+		t.Fatalf("experiment children = %d, want 1: %#v", len(experimentChildren), experimentChildren)
+	}
+	if !strings.HasPrefix(experimentChildren[0].Body, "Experiment leaf:") {
+		t.Fatalf("experiment body = %q, want experiment leaf", experimentChildren[0].Body)
+	}
+	if experimentChildren[0].Metadata["transition"] != "backlog_refinement_to_experiment" {
+		t.Fatalf("experiment transition metadata = %q", experimentChildren[0].Metadata["transition"])
+	}
+	if experimentChildren[0].Metadata["parent_item"] != parent.ID {
+		t.Fatalf("experiment child missing parent metadata: %#v", experimentChildren[0].Metadata)
+	}
+
+	updated, err := store.getItem(tenantID, parent.ID)
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	if updated.Metadata["refined_child_count"] != "2" {
+		t.Fatalf("refined_child_count = %q, want 2", updated.Metadata["refined_child_count"])
+	}
+	if updated.Metadata["refined_backlog_child_count"] != "1" {
+		t.Fatalf("refined_backlog_child_count = %q, want 1", updated.Metadata["refined_backlog_child_count"])
+	}
+	if updated.Metadata["refined_experiment_child_count"] != "1" {
+		t.Fatalf("refined_experiment_child_count = %q, want 1", updated.Metadata["refined_experiment_child_count"])
 	}
 }
 
@@ -188,6 +255,57 @@ func TestBacklogCompleteQueuesQAItem(t *testing.T) {
 	}
 }
 
+func TestBacklogBatchCompleteQueuesSingleQAItem(t *testing.T) {
+	store := newTestFeatureStore(t)
+	tenantID := storepkg.MasterTenantID.String()
+	backlogItems, err := store.addItems(tenantID, kindBacklog, []string{
+		"Add question stack UI primitive",
+		"Wire question stack into writing stage",
+	}, workflowOrigin{}, "repo-backlog:test", map[string]string{
+		"parent_item": "parent-1",
+	})
+	if err != nil {
+		t.Fatalf("addItems: %v", err)
+	}
+
+	tool := &boardTool{
+		feature: &SkynetWorkflowsFeature{store: store},
+		name:    "skynet_backlog",
+		kind:    kindBacklog,
+	}
+	result := tool.Execute(context.Background(), map[string]any{
+		"action":   "complete",
+		"item_ids": []any{backlogItems[0].ID, backlogItems[1].ID},
+		"result":   "Implemented one coherent question-stack slice.",
+	})
+	if result.IsError {
+		t.Fatalf("complete returned error: %s", result.ForLLM)
+	}
+
+	qaItems, err := store.listItems(tenantID, kindQA, statusPending, 10)
+	if err != nil {
+		t.Fatalf("list QA items: %v", err)
+	}
+	if len(qaItems) != 1 {
+		t.Fatalf("pending QA items = %d, want 1", len(qaItems))
+	}
+	if !strings.Contains(qaItems[0].Body, backlogItems[0].ID) || !strings.Contains(qaItems[0].Body, backlogItems[1].ID) {
+		t.Fatalf("QA body missing batch item IDs: %q", qaItems[0].Body)
+	}
+	for _, backlogItem := range backlogItems {
+		updated, err := store.getItem(tenantID, backlogItem.ID)
+		if err != nil {
+			t.Fatalf("get backlog item: %v", err)
+		}
+		if updated.Status != statusDone {
+			t.Fatalf("backlog status = %q, want done", updated.Status)
+		}
+		if updated.Metadata["qa_item"] != qaItems[0].ID {
+			t.Fatalf("qa_item metadata = %q, want %q", updated.Metadata["qa_item"], qaItems[0].ID)
+		}
+	}
+}
+
 func TestDispatchAgentUsesRootWorkspaceScope(t *testing.T) {
 	msgBus := bus.New()
 	feature := &SkynetWorkflowsFeature{msgBus: msgBus}
@@ -211,6 +329,147 @@ func TestDispatchAgentUsesRootWorkspaceScope(t *testing.T) {
 	}
 	if msg.Metadata["skynet_workflow"] != "true" {
 		t.Fatalf("skynet_workflow metadata = %q, want true", msg.Metadata["skynet_workflow"])
+	}
+}
+
+func TestCIFailureToolPublishesDispatchLog(t *testing.T) {
+	msgBus := bus.New()
+	tool := &ciFailureTool{
+		feature: &SkynetWorkflowsFeature{
+			msgBus:     msgBus,
+			targetRepo: "/repo",
+		},
+	}
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"log":          "CI failed",
+		"pull_request": "#6",
+		"branch":       "skynet/pr/example",
+		"run_url":      "https://github.com/example/actions/runs/1",
+		"channel":      "builder-bot",
+		"chat_id":      "-1003865644303",
+		"local_key":    "-1003865644303:topic:37674",
+		"peer_kind":    "group",
+	})
+	if result.IsError {
+		t.Fatalf("ci failure trigger returned error: %s", result.ForLLM)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	inbound, ok := msgBus.ConsumeInbound(ctx)
+	if !ok {
+		t.Fatal("expected dispatched inbound message")
+	}
+	if inbound.AgentID != agentKeyCIFixer {
+		t.Fatalf("AgentID = %q, want %q", inbound.AgentID, agentKeyCIFixer)
+	}
+
+	outbound, ok := msgBus.SubscribeOutbound(ctx)
+	if !ok {
+		t.Fatal("expected dispatch log outbound message")
+	}
+	for _, want := range []string{
+		"[SKYNET CI FIXER DISPATCHED]",
+		"Agent: " + agentKeyCIFixer,
+		"Pull request: #6",
+		"Branch: skynet/pr/example",
+		"Status: accepted by GoClaw; agent is starting.",
+	} {
+		if !strings.Contains(outbound.Content, want) {
+			t.Fatalf("dispatch log missing %q:\n%s", want, outbound.Content)
+		}
+	}
+	if outbound.Metadata[toolspkg.MetaMessageThreadID] != "37674" {
+		t.Fatalf("thread metadata = %q, want 37674", outbound.Metadata[toolspkg.MetaMessageThreadID])
+	}
+}
+
+func TestPRConflictToolPublishesDispatchLog(t *testing.T) {
+	msgBus := bus.New()
+	tool := &prConflictTool{
+		feature: &SkynetWorkflowsFeature{
+			msgBus:     msgBus,
+			targetRepo: "/repo",
+		},
+	}
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"pull_request": "#11",
+		"title":        "feat: share cards",
+		"repository":   "duyvt6663/ResearchCrafters",
+		"branch":       "skynet/pr/share-card-public-urls-2026-05-15",
+		"base_branch":  "main",
+		"commit":       "6c8c278",
+		"base_sha":     "edea00d",
+		"merge_state":  "DIRTY",
+		"checks":       "SUCCESS",
+		"url":          "https://github.com/duyvt6663/ResearchCrafters/pull/11",
+		"channel":      "builder-bot",
+		"chat_id":      "-1003865644303",
+		"local_key":    "-1003865644303:topic:37674",
+		"peer_kind":    "group",
+	})
+	if result.IsError {
+		t.Fatalf("pr conflict trigger returned error: %s", result.ForLLM)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	inbound, ok := msgBus.ConsumeInbound(ctx)
+	if !ok {
+		t.Fatal("expected dispatched inbound message")
+	}
+	if inbound.AgentID != agentKeyPRConflictResolver {
+		t.Fatalf("AgentID = %q, want %q", inbound.AgentID, agentKeyPRConflictResolver)
+	}
+	for _, want := range []string{
+		"[Skynet PR Merge Conflict]",
+		"Pull request: #11",
+		"Merge state: DIRTY",
+		"Resolve it even if CI/Lighthouse checks are already green",
+	} {
+		if !strings.Contains(inbound.Content, want) {
+			t.Fatalf("inbound conflict prompt missing %q:\n%s", want, inbound.Content)
+		}
+	}
+
+	outbound, ok := msgBus.SubscribeOutbound(ctx)
+	if !ok {
+		t.Fatal("expected dispatch log outbound message")
+	}
+	for _, want := range []string{
+		"[SKYNET PR CONFLICT RESOLVER DISPATCHED]",
+		"Agent: " + agentKeyPRConflictResolver,
+		"Pull request: #11",
+		"Checks: SUCCESS",
+		"Status: accepted by GoClaw; conflict resolver is starting.",
+	} {
+		if !strings.Contains(outbound.Content, want) {
+			t.Fatalf("dispatch log missing %q:\n%s", want, outbound.Content)
+		}
+	}
+	if outbound.Metadata[toolspkg.MetaMessageThreadID] != "37674" {
+		t.Fatalf("thread metadata = %q, want 37674", outbound.Metadata[toolspkg.MetaMessageThreadID])
+	}
+}
+
+func TestPRConflictDedupeKeyNormalizesPRNumber(t *testing.T) {
+	args := map[string]any{
+		"repository":   "duyvt6663/ResearchCrafters",
+		"pull_request": "https://github.com/duyvt6663/ResearchCrafters/pull/11",
+		"base_branch":  "main",
+		"base_sha":     "edea00d",
+		"branch":       "skynet/pr/share-card-public-urls-2026-05-15",
+		"commit":       "6c8c278",
+		"merge_state":  "dirty",
+	}
+
+	if got, want := prConflictConfigKey(args), "beta.skynet_workflows.pr_conflict.duyvt6663_researchcrafters.11"; got != want {
+		t.Fatalf("config key = %q, want %q", got, want)
+	}
+	if got := prConflictFingerprint(args); !strings.Contains(got, "|DIRTY") {
+		t.Fatalf("fingerprint did not normalize merge_state: %q", got)
 	}
 }
 

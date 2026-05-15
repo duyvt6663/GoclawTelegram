@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -221,6 +222,133 @@ func (s *featureStore) claimNext(tenantID, kind, claimedBy, agentKey string) (*w
 		return nil, nil
 	}
 	return s.getItem(tenantID, item.ID)
+}
+
+func (s *featureStore) claimPendingByIDs(tenantID, kind, claimedBy, agentKey string, ids []string) ([]workflowItem, error) {
+	if !validKinds[kind] {
+		return nil, fmt.Errorf("unsupported queue kind %q", kind)
+	}
+	ids = uniqueNonEmpty(ids)
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("item_ids is required")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UTC()
+	items := make([]workflowItem, 0, len(ids))
+	for _, id := range ids {
+		res, err := s.db.Exec(`
+			UPDATE beta_skynet_workflow_items
+			SET status=$4, claimed_by=$5, agent_key=$6, updated_at=$7
+			WHERE id=$1 AND tenant_id=$2 AND kind=$3 AND status='pending'`,
+			strings.TrimSpace(id), strings.TrimSpace(tenantID), kind, statusInProgress,
+			strings.TrimSpace(claimedBy), strings.TrimSpace(agentKey), now,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if rows, _ := res.RowsAffected(); rows == 0 {
+			continue
+		}
+		item, err := s.getItem(tenantID, id)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *item)
+	}
+	return items, nil
+}
+
+func (s *featureStore) relatedPending(tenantID string, primary *workflowItem, limit int) ([]workflowItem, error) {
+	if primary == nil {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 10 {
+		limit = 5
+	}
+	candidates, err := s.listItems(tenantID, primary.Kind, statusPending, 100)
+	if err != nil {
+		return nil, err
+	}
+	type scoredItem struct {
+		item  workflowItem
+		score int
+	}
+	scored := make([]scoredItem, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.ID == primary.ID {
+			continue
+		}
+		score := relatedItemScore(primary, &candidate)
+		if score <= 0 {
+			continue
+		}
+		scored = append(scored, scoredItem{item: candidate, score: score})
+	}
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].score == scored[j].score {
+			return scored[i].item.CreatedAt.Before(scored[j].item.CreatedAt)
+		}
+		return scored[i].score > scored[j].score
+	})
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+	items := make([]workflowItem, 0, len(scored))
+	for _, entry := range scored {
+		items = append(items, entry.item)
+	}
+	return items, nil
+}
+
+func relatedItemScore(primary, candidate *workflowItem) int {
+	if primary == nil || candidate == nil || primary.Kind != candidate.Kind {
+		return 0
+	}
+	score := 0
+	if sameNonEmpty(primary.Metadata["parent_item"], candidate.Metadata["parent_item"]) {
+		score += 100
+	}
+	if sameNonEmpty(primary.Metadata["source_path"], candidate.Metadata["source_path"]) {
+		score += 60
+	}
+	if sameNonEmpty(primary.Metadata["parent_source_path"], candidate.Metadata["parent_source_path"]) {
+		score += 50
+	}
+	if sameNonEmpty(primary.Metadata["section"], candidate.Metadata["section"]) {
+		score += 25
+	}
+	if lineDistance := absInt(metadataLine(primary.Metadata) - metadataLine(candidate.Metadata)); lineDistance > 0 && lineDistance <= 10 {
+		score += 20 - lineDistance
+	}
+	return score
+}
+
+func sameNonEmpty(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	return a != "" && b != "" && a == b
+}
+
+func metadataLine(metadata map[string]string) int {
+	for _, key := range []string{"source_line", "parent_source_line"} {
+		if value := strings.TrimSpace(metadata[key]); value != "" {
+			var n int
+			if _, err := fmt.Sscanf(value, "%d", &n); err == nil {
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+func absInt(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 func (s *featureStore) firstPending(tenantID, kind string) (*workflowItem, error) {
