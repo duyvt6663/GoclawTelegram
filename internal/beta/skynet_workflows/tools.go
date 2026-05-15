@@ -515,7 +515,11 @@ PR composition requirements:
 - Cherry-pick finished commits when they exist; otherwise stage and commit only the coherent files for this scope.
 - Exclude unrelated dirty work and never revert user changes.
 - Run focused verification.
-- Create a GitHub PR if auth/remotes allow it, or produce a PR-ready title/body and exact blocker if creation is blocked.`, item.ID, item.Body, result)
+- Create a GitHub PR if auth/remotes allow it, or produce a PR-ready title/body and exact blocker if creation is blocked.
+- Never backslash-escape Markdown backtick characters in the PR title or body; preserve inline code and fenced code blocks as normal GitHub Markdown.
+- Prefer writing the PR body to a temporary Markdown file and using gh pr create --body-file so shell quoting does not force Markdown escaping or command substitution.
+- For important architecture PRs, include an Architecture section with Before and After Mermaid diagrams. Validate grammar before publishing: use a valid directive such as flowchart LR, graph TD, sequenceDiagram, stateDiagram-v2, or gantt; keep node IDs simple; quote labels with punctuation; close brackets/arrows; add dateFormat for gantt; and keep sequence participants/messages syntactically valid.
+- For frontend feature PRs, render the affected route/component and capture visual evidence with a browser or Playwright snapshot/screenshot, or an equivalent rendered artifact. Include the artifact path/link, viewport, and any render caveat in the PR body.`, item.ID, item.Body, result)
 	prItems, err := t.feature.store.addItems(tenantID, kindPR, []string{prText}, originFromItem(item), "qa-pass:"+item.ID, map[string]string{
 		"created_by_agent": tools.ToolAgentKeyFromCtx(ctx),
 		"source_qa_item":   item.ID,

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/bus"
 	storepkg "github.com/nextlevelbuilder/goclaw/internal/store"
 	toolspkg "github.com/nextlevelbuilder/goclaw/internal/tools"
@@ -188,8 +189,42 @@ func TestQAPassQueuesPRCompositionItem(t *testing.T) {
 	if !strings.Contains(prItem.Body, "Manual QA passed after running focused tests.") {
 		t.Fatalf("PR item body missing QA evidence: %q", prItem.Body)
 	}
+	for _, want := range []string{
+		"Never backslash-escape Markdown backtick characters",
+		"gh pr create --body-file",
+		"Before and After Mermaid diagrams",
+		"flowchart LR",
+		"snapshot/screenshot",
+	} {
+		if !strings.Contains(prItem.Body, want) {
+			t.Fatalf("PR item body missing %q:\n%s", want, prItem.Body)
+		}
+	}
 	if updated.Metadata["pr_item"] != prItem.ID {
 		t.Fatalf("QA pr_item metadata = %q, want %q", updated.Metadata["pr_item"], prItem.ID)
+	}
+}
+
+func TestPRComposerContextIncludesPRBodyRules(t *testing.T) {
+	feature := &SkynetWorkflowsFeature{targetRepo: "/repo"}
+	files := feature.contextFilesForSpec(workflowAgentSpec{
+		DisplayName: "Skynet PR Composer",
+		Frontmatter: "Post-QA PR composer",
+		Role:        "pr-composer",
+	}, "/repo")
+	content := files[bootstrap.AgentsFile]
+
+	for _, want := range []string{
+		"Never backslash-escape Markdown backtick characters",
+		"gh pr create --body-file",
+		"Before and After Mermaid diagrams",
+		"flowchart LR",
+		"sequenceDiagram",
+		"snapshot/screenshot",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("PR composer context missing %q:\n%s", want, content)
+		}
 	}
 }
 

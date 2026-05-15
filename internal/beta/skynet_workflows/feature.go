@@ -549,7 +549,13 @@ Operational rules:
 4. Build a coherent PR branch from the completed work. Prefer cherry-picking finished commits when they exist; otherwise stage and commit only files belonging to the passed QA scope. Do not include unrelated dirty files or revert user work.
 5. Run focused verification for the PR contents.
 6. Create a GitHub PR if existing auth/remotes allow it. If PR creation is blocked, leave a branch/commit plus PR title/body and the exact command or blocker.
-7. Call skynet_pr with action "complete" and include branch, commits, files, verification, and PR URL/body. Use "fail" only with concrete blocker evidence.
+7. PR body rules:
+   - Never backslash-escape Markdown backtick characters in PR titles or bodies. Preserve inline code and fenced code blocks as normal GitHub Markdown.
+   - Prefer writing the PR body to a temporary Markdown file and using gh pr create --body-file so shell quoting does not force Markdown escaping or command substitution.
+   - For important architecture changes, including agent orchestration, data model, storage, auth, routing, workflow/CI, or cross-service/module flow, include an Architecture section with Before and After Mermaid diagrams.
+   - Validate diagram grammar before publishing: choose a valid directive such as flowchart LR, graph TD, sequenceDiagram, stateDiagram-v2, or gantt; use simple alphanumeric/underscore node IDs; quote labels with punctuation; close brackets/arrows; add dateFormat for gantt; and keep sequence participants/messages syntactically valid. If unsure, use a simple flowchart LR.
+   - For frontend feature PRs, render the affected route/component and capture visual evidence with a browser or Playwright snapshot/screenshot, or an equivalent rendered artifact. Include the artifact path/link, viewport, and any render caveat in the PR body.
+8. Call skynet_pr with action "complete" and include branch, commits, files, verification, PR URL/body, architecture diagrams if required, and frontend snapshot evidence if applicable. Use "fail" only with concrete blocker evidence.
 `
 	case "feedback-planner":
 		roleRules = `Feedback planning flow:
@@ -709,7 +715,7 @@ func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
 			Name:     "skynet pr composer",
 			AgentKey: agentKeyPRComposer,
 			EveryMS:  10 * 60 * 1000,
-			Message:  `Run one Skynet PR composition iteration. Call mcp__goclaw-bridge__skynet_pr with action "next". If an item is returned, inspect the target repository, cherry-pick or stage only coherent post-QA changes into a PR branch, verify it, then call mcp__goclaw-bridge__skynet_pr with action "complete" including branch, commits, files, verification, and PR URL or PR-ready body. If no pending PR item exists, respond with "No pending PR item."`,
+			Message:  `Run one Skynet PR composition iteration. Call mcp__goclaw-bridge__skynet_pr with action "next". If an item is returned, inspect the target repository, cherry-pick or stage only coherent post-QA changes into a PR branch, verify it, then create or prepare the PR. Never backslash-escape Markdown backtick characters in the PR title or body; prefer gh pr create --body-file from a temporary Markdown file. For important architecture PRs, include Before and After Mermaid diagrams and validate the diagram grammar before publishing. For frontend feature PRs, render the affected route/component and include snapshot/screenshot or equivalent visual evidence with viewport details. Then call mcp__goclaw-bridge__skynet_pr with action "complete" including branch, commits, files, verification, PR URL or PR-ready body, architecture diagrams when required, and frontend visual evidence when applicable. If no pending PR item exists, respond with "No pending PR item."`,
 		},
 	}
 
