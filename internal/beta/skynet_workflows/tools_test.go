@@ -195,6 +195,9 @@ func TestQAPassQueuesPRCompositionItem(t *testing.T) {
 		"Before and After Mermaid diagrams",
 		"flowchart LR",
 		"snapshot/screenshot",
+		"untracked stash parents",
+		"refs/stash^3",
+		"git ls-tree -r refs/stash^3",
 	} {
 		if !strings.Contains(prItem.Body, want) {
 			t.Fatalf("PR item body missing %q:\n%s", want, prItem.Body)
@@ -221,6 +224,9 @@ func TestPRComposerContextIncludesPRBodyRules(t *testing.T) {
 		"flowchart LR",
 		"sequenceDiagram",
 		"snapshot/screenshot",
+		"Do not fail as missing work",
+		"untracked stash parents",
+		"refs/stash^3",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("PR composer context missing %q:\n%s", want, content)

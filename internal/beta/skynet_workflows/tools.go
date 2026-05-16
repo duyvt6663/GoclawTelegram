@@ -512,6 +512,8 @@ QA pass evidence:
 
 PR composition requirements:
 - Gather the changes connected to this QA item and its upstream backlog or experiment context.
+- Before declaring the work missing, inspect current worktrees, git log --all for expected files, branch containment for referenced commits, git stash list, tracked stash diffs, and untracked stash parents such as refs/stash^3. Use git ls-tree -r refs/stash^3 and git show refs/stash^3:<path> when untracked artifacts may hold the completed work.
+- If scoped artifacts are found in a stash, recover only those files into a clean PR branch and continue.
 - Cherry-pick finished commits when they exist; otherwise stage and commit only the coherent files for this scope.
 - Exclude unrelated dirty work and never revert user changes.
 - Run focused verification.
