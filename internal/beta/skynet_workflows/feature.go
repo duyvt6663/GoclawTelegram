@@ -169,6 +169,9 @@ func (f *SkynetWorkflowsFeature) resolveTargetRepo(ctx context.Context) string {
 			return strings.TrimSpace(value)
 		}
 	}
+	if strings.TrimSpace(f.targetRepo) != "" {
+		return strings.TrimSpace(f.targetRepo)
+	}
 	if f.workspace != "" {
 		return f.workspace
 	}
@@ -740,6 +743,12 @@ func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
 			AgentKey: agentKeyExperimentIterator,
 			EveryMS:  60 * 60 * 1000,
 			Message:  `Run one Skynet experiment iteration. Call mcp__goclaw-bridge__skynet_experiments with action "next". This syncs repo experiments from apps/web/experiments when the queue is empty. If an item is returned, read its README/Mock/registry context, build or validate the experiment, then call mcp__goclaw-bridge__skynet_experiments with action "request_review". If no pending item exists, respond with "No pending experiment item."`,
+		},
+		{
+			Name:     "skynet experiment review reminder",
+			AgentKey: agentKeyExperimentIterator,
+			EveryMS:  5 * 60 * 1000,
+			Message:  `Run one Skynet experiment review reminder. Call mcp__goclaw-bridge__skynet_experiments with action "review_reminders" and limit 10. Do not validate, revise, approve, or implement any experiment in this reminder tick. If no review item exists, respond with "No experiment reviews awaiting action."`,
 		},
 		{
 			Name:     "skynet qa iterator",

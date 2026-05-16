@@ -2,6 +2,8 @@ package skynetworkflows
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -593,5 +595,89 @@ func TestEmptyQueueNextPublishesIdleLog(t *testing.T) {
 	}
 	if !strings.Contains(outbound.Content, "[SKYNET QA IDLE]") {
 		t.Fatalf("idle log content = %q", outbound.Content)
+	}
+}
+
+func TestExperimentReviewReminderPublishesAccessLinks(t *testing.T) {
+	t.Setenv("GOCLAW_SKYNET_TARGET_REPO", "")
+	store := newTestFeatureStore(t)
+	msgBus := bus.New()
+	tenantID := storepkg.MasterTenantID.String()
+	repo := t.TempDir()
+	gitDir := filepath.Join(repo, ".git")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "[remote \"origin\"]\n\turl = git@github.com-spartan-duykhanh:duyvt6663/ResearchCrafters.git\n"
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := store.addItems(tenantID, kindExperiment, []string{
+		"[apps/web/experiments/w2-question-stack/README.md] W2 - Question Stack\nStatus: draft\nPath: apps/web/experiments/w2-question-stack",
+	}, workflowOrigin{}, "repo-experiment:w2-question-stack", map[string]string{
+		"experiment_slug":   "w2-question-stack",
+		"experiment_path":   "apps/web/experiments/w2-question-stack",
+		"experiment_readme": "apps/web/experiments/w2-question-stack/README.md",
+	})
+	if err != nil {
+		t.Fatalf("addItems: %v", err)
+	}
+	reviewItem, err := store.updateStatus(tenantID, items[0].ID, statusReview, "Ready for channel review.", map[string]string{
+		"transition": "experiment_review_requested",
+	})
+	if err != nil {
+		t.Fatalf("updateStatus: %v", err)
+	}
+
+	tool := &boardTool{
+		feature: &SkynetWorkflowsFeature{
+			store:      store,
+			msgBus:     msgBus,
+			targetRepo: repo,
+		},
+		name: "skynet_experiments",
+		kind: kindExperiment,
+	}
+	result := tool.Execute(context.Background(), map[string]any{
+		"action":    "review_reminders",
+		"channel":   "telegram",
+		"chat_id":   "chat-review",
+		"local_key": "chat-review:topic:42",
+	})
+	if result.IsError {
+		t.Fatalf("review_reminders returned error: %s", result.ForLLM)
+	}
+	if !strings.Contains(result.ForLLM, `"status": "review_reminder_published"`) {
+		t.Fatalf("result missing published status: %s", result.ForLLM)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	outbound, ok := msgBus.SubscribeOutbound(ctx)
+	if !ok {
+		t.Fatal("expected outbound review reminder")
+	}
+	if outbound.Channel != "telegram" || outbound.ChatID != "chat-review:topic:42" {
+		t.Fatalf("outbound target = %s/%s, want telegram/chat-review:topic:42", outbound.Channel, outbound.ChatID)
+	}
+	if outbound.Metadata[toolspkg.MetaMessageThreadID] != "42" {
+		t.Fatalf("thread metadata = %q, want 42", outbound.Metadata[toolspkg.MetaMessageThreadID])
+	}
+	for _, want := range []string{
+		"SKYNET EXPERIMENT REVIEW REMINDER",
+		"W2 - Question Stack",
+		reviewItem.ID,
+		"https://github.com/duyvt6663/ResearchCrafters/blob/main/apps/web/experiments/w2-question-stack/README.md",
+		"https://github.com/duyvt6663/ResearchCrafters/blob/main/apps/web/experiments/w2-question-stack/Mock.tsx",
+		"Route: `/experiments/w2-question-stack`",
+		"Decision needed: approve to backlog, request revision, or drop.",
+	} {
+		if !strings.Contains(outbound.Content, want) {
+			t.Fatalf("review reminder missing %q:\n%s", want, outbound.Content)
+		}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -154,7 +155,7 @@ func (t *boardTool) Parameters() map[string]any {
 				"type": "string",
 				"enum": []string{
 					"add", "parse", "sync_repo", "list", "next", "complete", "refine", "split", "fail",
-					"claim_related", "pass", "fail_to_backlog", "request_review", "approve_to_backlog", "revise", "drop",
+					"claim_related", "pass", "fail_to_backlog", "request_review", "review_reminders", "approve_to_backlog", "revise", "drop",
 				},
 			},
 			"text":      map[string]any{"type": "string", "description": "Raw text or bullet list to add. For refine/split, this is the child backlog bullet list to enqueue."},
@@ -270,6 +271,11 @@ func (t *boardTool) Execute(ctx context.Context, args map[string]any) *tools.Res
 			return tools.ErrorResult("request_review is only valid for skynet_experiments")
 		}
 		return t.requestExperimentReview(ctx, tenantID, args)
+	case "review_reminders":
+		if t.kind != kindExperiment {
+			return tools.ErrorResult("review_reminders is only valid for skynet_experiments")
+		}
+		return t.publishExperimentReviewReminders(ctx, tenantID, args)
 	case "approve_to_backlog":
 		if t.kind != kindExperiment {
 			return tools.ErrorResult("approve_to_backlog is only valid for skynet_experiments")
@@ -720,11 +726,28 @@ func (t *boardTool) requestExperimentReview(ctx context.Context, tenantID string
 			"status":  "review_pending_delivery",
 			"item":    updated,
 			"warning": err.Error(),
-			"message": experimentReviewMessage(updated, result),
+			"message": experimentReviewMessage(updated, result, t.feature.resolveTargetRepo(ctx)),
 		})
 	}
 	_ = item
 	return jsonResult(map[string]any{"status": "review_requested", "item": updated})
+}
+
+func (t *boardTool) publishExperimentReviewReminders(ctx context.Context, tenantID string, args map[string]any) *tools.Result {
+	limit := intArg(args, "limit")
+	published, total, err := t.feature.publishExperimentReviewReminders(ctx, tenantID, originFromToolContext(ctx, args), limit)
+	if err != nil {
+		return tools.ErrorResult(err.Error())
+	}
+	status := "no_review_items"
+	if published > 0 {
+		status = "review_reminder_published"
+	}
+	return jsonResult(map[string]any{
+		"status":          status,
+		"published_count": published,
+		"review_count":    total,
+	})
 }
 
 func (t *boardTool) approveExperimentToBacklog(ctx context.Context, tenantID string, args map[string]any) *tools.Result {
@@ -1196,10 +1219,62 @@ func (f *SkynetWorkflowsFeature) publishExperimentReview(ctx context.Context, it
 	f.msgBus.PublishOutbound(bus.OutboundMessage{
 		Channel:  origin.Channel,
 		ChatID:   chatID,
-		Content:  experimentReviewMessage(item, result),
+		Content:  experimentReviewMessage(item, result, f.resolveTargetRepo(ctx)),
 		Metadata: metadata,
 	})
 	return nil
+}
+
+func (f *SkynetWorkflowsFeature) publishExperimentReviewReminders(ctx context.Context, tenantID string, origin workflowOrigin, limit int) (int, int, error) {
+	if limit <= 0 || limit > 20 {
+		limit = 10
+	}
+	items, err := f.store.listItems(tenantID, kindExperiment, statusReview, limit)
+	if err != nil {
+		return 0, 0, err
+	}
+	total := len(items)
+	if counts, err := f.store.counts(tenantID); err == nil {
+		for _, entry := range counts {
+			if entry.Kind == kindExperiment {
+				total = entry.Review
+				break
+			}
+		}
+	}
+	if len(items) == 0 {
+		return 0, total, nil
+	}
+	if f.msgBus == nil {
+		return 0, total, fmt.Errorf("message bus is unavailable")
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		origin = f.configuredOrigin(ctx)
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		origin = originFromItem(&items[0])
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		return 0, total, fmt.Errorf("review channel is not configured")
+	}
+	chatID := origin.ChatID
+	if origin.LocalKey != "" {
+		chatID = origin.LocalKey
+	}
+	metadata := map[string]string{}
+	if origin.LocalKey != "" {
+		metadata["local_key"] = origin.LocalKey
+		if threadID := threadIDFromLocalKey(origin.LocalKey); threadID != "" {
+			metadata[tools.MetaMessageThreadID] = threadID
+		}
+	}
+	f.msgBus.PublishOutbound(bus.OutboundMessage{
+		Channel:  origin.Channel,
+		ChatID:   chatID,
+		Content:  experimentReviewReminderMessage(items, total, f.resolveTargetRepo(ctx), time.Now().UTC()),
+		Metadata: metadata,
+	})
+	return len(items), total, nil
 }
 
 func (f *SkynetWorkflowsFeature) publishWorkflowUpdate(ctx context.Context, item *workflowItem, transition, result string) error {
@@ -1355,18 +1430,166 @@ func configKeyQueueIdleLog(kind string) string {
 	return "beta.skynet_workflows.last_idle_log." + strings.TrimSpace(kind)
 }
 
-func experimentReviewMessage(item *workflowItem, result string) string {
-	return fmt.Sprintf(`[SKYNET EXPERIMENT REVIEW]
+func experimentReviewMessage(item *workflowItem, result, targetRepo string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `[SKYNET EXPERIMENT REVIEW]
 Item: %s
 
 Experiment:
 %s
 
+`, item.ID, item.Body)
+	appendExperimentAccessLinks(&b, *item, targetRepo)
+	fmt.Fprintf(&b, `
 Result:
 %s
 
 Reply with approval to transition this into backlog, or send revision feedback to keep iterating.
-`, item.ID, item.Body, result)
+`, result)
+	return b.String()
+}
+
+func experimentReviewReminderMessage(items []workflowItem, total int, targetRepo string, now time.Time) string {
+	if total <= 0 {
+		total = len(items)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "🟨 **SKYNET EXPERIMENT REVIEW REMINDER**\nPending experiment reviews: %d\n", total)
+	fmt.Fprintf(&b, "This reminder repeats every 5 minutes until review items are accepted, revised, dropped, or otherwise moved out of review.\n")
+	for i, item := range items {
+		fmt.Fprintf(&b, "\n%d. **%s**\nItem: `%s`\nSource: `%s`\n", i+1, experimentReviewTitle(item), item.ID, item.Source)
+		if !item.UpdatedAt.IsZero() {
+			fmt.Fprintf(&b, "Waiting since: `%s UTC`", item.UpdatedAt.UTC().Format("2006-01-02 15:04"))
+			if now.After(item.UpdatedAt) {
+				fmt.Fprintf(&b, " (%s)", now.Sub(item.UpdatedAt).Round(time.Minute))
+			}
+			b.WriteByte('\n')
+		}
+		appendExperimentAccessLinks(&b, item, targetRepo)
+		b.WriteString("Decision needed: approve to backlog, request revision, or drop.\n")
+	}
+	if len(items) < total {
+		fmt.Fprintf(&b, "\nShowing %d of %d review items.", len(items), total)
+	}
+	return b.String()
+}
+
+func appendExperimentAccessLinks(b *strings.Builder, item workflowItem, targetRepo string) {
+	readmePath := experimentReadmePath(item)
+	if readmePath != "" {
+		if link := repoGitHubFileURL(targetRepo, readmePath); link != "" {
+			fmt.Fprintf(b, "README: [%s](%s)\n", readmePath, link)
+		} else {
+			fmt.Fprintf(b, "README: `%s`\n", readmePath)
+		}
+	}
+	mockPath := experimentMockPath(item)
+	if mockPath != "" {
+		if link := repoGitHubFileURL(targetRepo, mockPath); link != "" {
+			fmt.Fprintf(b, "Mock: [%s](%s)\n", mockPath, link)
+		} else {
+			fmt.Fprintf(b, "Mock: `%s`\n", mockPath)
+		}
+	}
+	if slug := experimentSlug(item); slug != "" {
+		fmt.Fprintf(b, "Route: `/experiments/%s`\n", slug)
+	}
+}
+
+func experimentReviewTitle(item workflowItem) string {
+	for _, line := range strings.Split(item.Body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			if idx := strings.Index(line, "]"); idx > 0 {
+				title := strings.TrimSpace(line[idx+1:])
+				if title != "" {
+					return title
+				}
+			}
+		}
+		if len(line) > 120 {
+			return line[:120] + "..."
+		}
+		return line
+	}
+	return item.ID
+}
+
+func experimentReadmePath(item workflowItem) string {
+	if path := cleanRepoRelPath(item.Metadata["experiment_readme"]); path != "" {
+		return path
+	}
+	for _, line := range strings.Split(item.Body, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			if idx := strings.Index(line, "]"); idx > 0 {
+				if path := cleanRepoRelPath(line[1:idx]); path != "" {
+					return path
+				}
+			}
+		}
+		if path := strings.TrimSpace(strings.TrimPrefix(line, "Path:")); path != line {
+			if dir := cleanRepoRelPath(path); dir != "" {
+				return strings.TrimSuffix(dir, "/") + "/README.md"
+			}
+		}
+	}
+	if dir := experimentDirPath(item); dir != "" {
+		return strings.TrimSuffix(dir, "/") + "/README.md"
+	}
+	return ""
+}
+
+func experimentMockPath(item workflowItem) string {
+	if dir := experimentDirPath(item); dir != "" {
+		return strings.TrimSuffix(dir, "/") + "/Mock.tsx"
+	}
+	return ""
+}
+
+func experimentDirPath(item workflowItem) string {
+	if path := cleanRepoRelPath(item.Metadata["experiment_path"]); path != "" {
+		return path
+	}
+	readme := cleanRepoRelPath(item.Metadata["experiment_readme"])
+	if readme == "" {
+		readme = experimentReadmePathFromBody(item.Body)
+	}
+	if readme != "" {
+		return strings.TrimSuffix(filepath.ToSlash(filepath.Dir(readme)), ".")
+	}
+	for _, line := range strings.Split(item.Body, "\n") {
+		line = strings.TrimSpace(line)
+		if path := strings.TrimSpace(strings.TrimPrefix(line, "Path:")); path != line {
+			return cleanRepoRelPath(path)
+		}
+	}
+	return ""
+}
+
+func experimentReadmePathFromBody(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			if idx := strings.Index(line, "]"); idx > 0 {
+				return cleanRepoRelPath(line[1:idx])
+			}
+		}
+	}
+	return ""
+}
+
+func experimentSlug(item workflowItem) string {
+	if slug := strings.TrimSpace(item.Metadata["experiment_slug"]); slug != "" {
+		return slug
+	}
+	if dir := experimentDirPath(item); dir != "" {
+		return filepath.Base(dir)
+	}
+	return ""
 }
 
 func originFromToolContext(ctx context.Context, args map[string]any) workflowOrigin {
