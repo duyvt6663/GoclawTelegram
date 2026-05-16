@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -89,6 +90,24 @@ func uniqueSorted(values []string) []string {
 	return values
 }
 
+func partitionRefinementItems(items []string) ([]string, []string) {
+	var backlogItems []string
+	var experimentItems []string
+	for _, item := range uniqueNonEmpty(items) {
+		if isExperimentRefinementItem(item) {
+			experimentItems = append(experimentItems, item)
+			continue
+		}
+		backlogItems = append(backlogItems, item)
+	}
+	return backlogItems, experimentItems
+}
+
+func isExperimentRefinementItem(item string) bool {
+	lower := strings.ToLower(strings.TrimSpace(item))
+	return strings.HasPrefix(lower, "experiment leaf:") || strings.HasPrefix(lower, "experiment:")
+}
+
 func tenantKeyFromCtx(ctxTenant uuid.UUID) string {
 	if ctxTenant == uuid.Nil {
 		return storepkg.MasterTenantID.String()
@@ -127,6 +146,52 @@ func intArg(args map[string]any, key string) int {
 	default:
 		return 0
 	}
+}
+
+func boolArg(args map[string]any, key string) bool {
+	switch value := args[key].(type) {
+	case bool:
+		return value
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "true", "yes", "y", "on":
+			return true
+		}
+	}
+	return false
+}
+
+func stringSliceArg(args map[string]any, keys ...string) []string {
+	for _, key := range keys {
+		switch value := args[key].(type) {
+		case []string:
+			return uniqueNonEmpty(value)
+		case []any:
+			out := make([]string, 0, len(value))
+			for _, item := range value {
+				if text, ok := item.(string); ok {
+					out = append(out, text)
+				}
+			}
+			return uniqueNonEmpty(out)
+		case string:
+			parts := strings.FieldsFunc(value, func(r rune) bool {
+				return r == ',' || r == '\n' || r == ' '
+			})
+			return uniqueNonEmpty(parts)
+		}
+	}
+	return nil
+}
+
+func itemIDsArg(args map[string]any) []string {
+	ids := stringSliceArg(args, "item_ids", "ids")
+	if len(ids) == 0 {
+		if id := stringArg(args, "item_id"); id != "" {
+			ids = []string{id}
+		}
+	}
+	return ids
 }
 
 func boolPtr(value bool) *bool {
@@ -272,4 +337,168 @@ func threadIDFromLocalKey(localKey string) string {
 		}
 	}
 	return ""
+}
+
+func cleanRepoRelPath(value string) string {
+	value = filepath.ToSlash(strings.TrimSpace(value))
+	value = strings.TrimPrefix(value, "./")
+	value = strings.TrimPrefix(value, "/")
+	if value == "" || value == "." || strings.HasPrefix(value, "../") || strings.Contains(value, "/../") {
+		return ""
+	}
+	clean := filepath.ToSlash(filepath.Clean(value))
+	if clean == "." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+		return ""
+	}
+	return clean
+}
+
+func repoGitHubFileURL(repo, relPath string) string {
+	relPath = cleanRepoRelPath(relPath)
+	if repo == "" || relPath == "" {
+		return ""
+	}
+	gitDir := repoGitDir(repo)
+	if gitDir == "" {
+		return ""
+	}
+	commonDir := repoCommonGitDir(gitDir)
+	remote := gitConfigOriginURL(filepath.Join(commonDir, "config"))
+	if remote == "" {
+		return ""
+	}
+	branch := gitHeadBranch(filepath.Join(gitDir, "HEAD"))
+	return githubFileURLFromRemote(remote, branch, relPath)
+}
+
+func repoGitDir(repo string) string {
+	dotGit := filepath.Join(repo, ".git")
+	if info, err := os.Stat(dotGit); err == nil && info.IsDir() {
+		return dotGit
+	}
+	data, err := os.ReadFile(dotGit)
+	if err != nil {
+		return ""
+	}
+	line := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(line, "gitdir:") {
+		return ""
+	}
+	gitDir := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
+	if gitDir == "" {
+		return ""
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(repo, gitDir)
+	}
+	return filepath.Clean(gitDir)
+}
+
+func repoCommonGitDir(gitDir string) string {
+	data, err := os.ReadFile(filepath.Join(gitDir, "commondir"))
+	if err != nil {
+		return gitDir
+	}
+	commonDir := strings.TrimSpace(string(data))
+	if commonDir == "" {
+		return gitDir
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(gitDir, commonDir)
+	}
+	return filepath.Clean(commonDir)
+}
+
+func gitConfigOriginURL(configPath string) string {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+	inOrigin := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"))
+			inOrigin = section == `remote "origin"`
+			continue
+		}
+		if !inOrigin {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if ok && strings.TrimSpace(key) == "url" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func gitHeadBranch(headPath string) string {
+	data, err := os.ReadFile(headPath)
+	if err != nil {
+		return "main"
+	}
+	head := strings.TrimSpace(string(data))
+	const prefix = "ref: refs/heads/"
+	if strings.HasPrefix(head, prefix) {
+		if branch := strings.TrimSpace(strings.TrimPrefix(head, prefix)); branch != "" {
+			return branch
+		}
+	}
+	return "main"
+}
+
+func githubFileURLFromRemote(remote, branch, relPath string) string {
+	slug := githubSlugFromRemote(remote)
+	relPath = cleanRepoRelPath(relPath)
+	if slug == "" || relPath == "" {
+		return ""
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" || branch == "HEAD" {
+		branch = "main"
+	}
+	return "https://github.com/" + slug + "/blob/" + escapeURLPath(branch) + "/" + escapeURLPath(relPath)
+}
+
+func githubSlugFromRemote(remote string) string {
+	remote = strings.TrimSpace(remote)
+	remote = strings.TrimSuffix(remote, ".git")
+	if strings.HasPrefix(remote, "git@") {
+		withoutUser := strings.TrimPrefix(remote, "git@")
+		if idx := strings.Index(withoutUser, ":"); idx > 0 {
+			host := withoutUser[:idx]
+			if strings.HasPrefix(host, "github.com") {
+				remote = withoutUser[idx+1:]
+			}
+		}
+	}
+	for _, prefix := range []string{
+		"https://github.com/",
+		"http://github.com/",
+		"ssh://git@github.com/",
+		"git@github.com:",
+	} {
+		if strings.HasPrefix(remote, prefix) {
+			remote = strings.TrimPrefix(remote, prefix)
+			break
+		}
+	}
+	remote = strings.Trim(remote, "/")
+	parts := strings.Split(remote, "/")
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	return escapeURLPath(parts[0] + "/" + parts[1])
+}
+
+func escapeURLPath(value string) string {
+	parts := strings.Split(filepath.ToSlash(value), "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
 }

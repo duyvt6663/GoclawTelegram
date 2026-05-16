@@ -267,6 +267,21 @@ func MergeCronSchedule(current CronSchedule, patch *CronSchedule) CronSchedule {
 	return merged
 }
 
+func CronSchedulesEqual(a, b CronSchedule) bool {
+	return a.Kind == b.Kind &&
+		a.Expr == b.Expr &&
+		a.TZ == b.TZ &&
+		int64PtrEqual(a.AtMS, b.AtMS) &&
+		int64PtrEqual(a.EveryMS, b.EveryMS)
+}
+
+func int64PtrEqual(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
 // ValidateCronSchedule checks structural schedule validity without evaluating future run existence.
 func ValidateCronSchedule(schedule *CronSchedule) error {
 	switch schedule.Kind {

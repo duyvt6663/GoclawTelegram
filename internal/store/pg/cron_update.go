@@ -66,13 +66,22 @@ func (s *PGCronStore) UpdateJob(ctx context.Context, jobID string, patch store.C
 			return nil, err
 		}
 
+		scheduleChanged := !store.CronSchedulesEqual(current.Schedule, merged)
 		store.ApplyCronScheduleUpdates(updates, merged)
 
-		nextRun, err := store.NextRunForSchedule(&merged, effectiveEnabled, now, s.defaultTZ)
-		if err != nil {
-			return nil, err
+		if scheduleChanged {
+			nextRun, err := store.NextRunForSchedule(&merged, effectiveEnabled, now, s.defaultTZ)
+			if err != nil {
+				return nil, err
+			}
+			updates["next_run_at"] = nextRun
+		} else if patch.Enabled != nil {
+			nextRun, err := store.NextRunForToggle(&current.Schedule, effectiveEnabled, current.Enabled, current.NextRunAt, now, s.defaultTZ)
+			if err != nil {
+				return nil, err
+			}
+			updates["next_run_at"] = nextRun
 		}
-		updates["next_run_at"] = nextRun
 	} else if patch.Enabled != nil {
 		nextRun, err := store.NextRunForToggle(&current.Schedule, effectiveEnabled, current.Enabled, current.NextRunAt, now, s.defaultTZ)
 		if err != nil {

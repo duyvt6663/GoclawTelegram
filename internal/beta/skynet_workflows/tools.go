@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,6 +40,8 @@ func (t *workflowControlTool) Parameters() map[string]any {
 			"local_key":   map[string]any{"type": "string", "description": "Composite topic/thread key, e.g. -100123:topic:42. Defaults to current local key."},
 			"peer_kind":   map[string]any{"type": "string", "description": "direct or group. Defaults to current peer kind."},
 			"target_repo": map[string]any{"type": "string", "description": "Absolute path of the repository the Skynet workers should edit."},
+			"deploy_repo": map[string]any{"type": "string", "description": "Absolute path of the clean main deployment worktree."},
+			"web_port":    map[string]any{"type": "string", "description": "Local web port for main deployment refreshes."},
 		},
 		"required": []string{"action"},
 	}
@@ -64,6 +67,16 @@ func (t *workflowControlTool) Execute(ctx context.Context, args map[string]any) 
 				return tools.ErrorResult(err.Error())
 			}
 		}
+		if deployRepo := stringArg(args, "deploy_repo"); deployRepo != "" {
+			if err := t.feature.setDeployRepo(ctx, deployRepo); err != nil {
+				return tools.ErrorResult(err.Error())
+			}
+		}
+		if webPort := stringArg(args, "web_port"); webPort != "" {
+			if err := t.feature.setWebPort(ctx, webPort); err != nil {
+				return tools.ErrorResult(err.Error())
+			}
+		}
 		if _, err := t.feature.ensureAgents(ctx); err != nil {
 			return tools.ErrorResult(err.Error())
 		}
@@ -74,6 +87,8 @@ func (t *workflowControlTool) Execute(ctx context.Context, args map[string]any) 
 			"status":      "configured",
 			"origin":      t.feature.configuredOrigin(ctx),
 			"target_repo": t.feature.resolveTargetRepo(ctx),
+			"deploy_repo": t.feature.configuredDeployRepo(ctx),
+			"web_port":    t.feature.configuredWebPort(ctx),
 		})
 	case "seed_cron":
 		if err := t.feature.ensureCronJobs(ctx); err != nil {
@@ -100,6 +115,8 @@ func (t *workflowControlTool) status(ctx context.Context) *tools.Result {
 	payload := map[string]any{
 		"feature":     featureName,
 		"target_repo": t.feature.resolveTargetRepo(ctx),
+		"deploy_repo": t.feature.configuredDeployRepo(ctx),
+		"web_port":    t.feature.configuredWebPort(ctx),
 		"origin":      t.feature.configuredOrigin(ctx),
 		"agents":      agents,
 		"queues":      counts,
@@ -138,11 +155,12 @@ func (t *boardTool) Parameters() map[string]any {
 				"type": "string",
 				"enum": []string{
 					"add", "parse", "sync_repo", "list", "next", "complete", "refine", "split", "fail",
-					"pass", "fail_to_backlog", "request_review", "approve_to_backlog", "revise", "drop",
+					"claim_related", "pass", "fail_to_backlog", "request_review", "review_reminders", "approve_to_backlog", "revise", "drop",
 				},
 			},
 			"text":      map[string]any{"type": "string", "description": "Raw text or bullet list to add. For refine/split, this is the child backlog bullet list to enqueue."},
 			"item_id":   map[string]any{"type": "string", "description": "Workflow item ID for status transitions."},
+			"item_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional list of related workflow item IDs for batch claim or batch completion."},
 			"result":    map[string]any{"type": "string", "description": "Result, validation summary, review request, failure evidence, or transition notes."},
 			"feedback":  map[string]any{"type": "string", "description": "User feedback for experiment revision or transition."},
 			"status":    map[string]any{"type": "string", "description": "Optional status filter for list."},
@@ -168,20 +186,36 @@ func (t *boardTool) Execute(ctx context.Context, args map[string]any) *tools.Res
 	case "add", "parse":
 		return t.add(ctx, tenantID, args)
 	case "sync_repo":
-		if t.kind != kindBacklog {
-			return tools.ErrorResult("sync_repo is only valid for skynet_backlog")
+		switch t.kind {
+		case kindBacklog:
+			result, err := t.feature.syncRepoBacklog(ctx, tenantID)
+			if err != nil {
+				return tools.ErrorResult(err.Error())
+			}
+			return jsonResult(map[string]any{"status": "synced", "repo_sync": result})
+		case kindExperiment:
+			result, err := t.feature.syncRepoExperiments(ctx, tenantID)
+			if err != nil {
+				return tools.ErrorResult(err.Error())
+			}
+			return jsonResult(map[string]any{"status": "synced", "repo_sync": result})
+		default:
+			return tools.ErrorResult("sync_repo is only valid for skynet_backlog and skynet_experiments")
 		}
-		result, err := t.feature.syncRepoBacklog(ctx, tenantID)
-		if err != nil {
-			return tools.ErrorResult(err.Error())
-		}
-		return jsonResult(map[string]any{"status": "synced", "repo_sync": result})
 	case "list":
 		var syncResult *repoBacklogSyncResult
+		var experimentSyncResult *repoExperimentSyncResult
 		statusFilter := stringArg(args, "status")
 		if t.kind == kindBacklog && (statusFilter == "" || statusFilter == statusPending) {
 			var err error
 			syncResult, err = t.feature.syncRepoBacklog(ctx, tenantID)
+			if err != nil {
+				return tools.ErrorResult(err.Error())
+			}
+		}
+		if t.kind == kindExperiment && (statusFilter == "" || statusFilter == statusPending) {
+			var err error
+			experimentSyncResult, err = t.feature.syncRepoExperiments(ctx, tenantID)
 			if err != nil {
 				return tools.ErrorResult(err.Error())
 			}
@@ -193,6 +227,9 @@ func (t *boardTool) Execute(ctx context.Context, args map[string]any) *tools.Res
 		payload := map[string]any{"items": items}
 		if syncResult != nil {
 			payload["repo_sync"] = syncResult
+		}
+		if experimentSyncResult != nil {
+			payload["repo_sync"] = experimentSyncResult
 		}
 		return jsonResult(payload)
 	case "next":
@@ -210,6 +247,11 @@ func (t *boardTool) Execute(ctx context.Context, args map[string]any) *tools.Res
 			return tools.ErrorResult(action + " is only valid for skynet_backlog")
 		}
 		return t.refineBacklog(ctx, tenantID, args)
+	case "claim_related":
+		if t.kind != kindBacklog {
+			return tools.ErrorResult("claim_related is only valid for skynet_backlog")
+		}
+		return t.claimRelatedBacklog(ctx, tenantID, args)
 	case "fail":
 		return t.update(ctx, tenantID, args, statusFailed, "failed")
 	case "drop":
@@ -229,6 +271,11 @@ func (t *boardTool) Execute(ctx context.Context, args map[string]any) *tools.Res
 			return tools.ErrorResult("request_review is only valid for skynet_experiments")
 		}
 		return t.requestExperimentReview(ctx, tenantID, args)
+	case "review_reminders":
+		if t.kind != kindExperiment {
+			return tools.ErrorResult("review_reminders is only valid for skynet_experiments")
+		}
+		return t.publishExperimentReviewReminders(ctx, tenantID, args)
 	case "approve_to_backlog":
 		if t.kind != kindExperiment {
 			return tools.ErrorResult("approve_to_backlog is only valid for skynet_experiments")
@@ -284,6 +331,15 @@ func (t *boardTool) next(ctx context.Context, tenantID string, args map[string]a
 			return tools.ErrorResult(err.Error())
 		}
 	}
+	if item == nil && t.kind == kindExperiment {
+		if _, err := t.feature.syncRepoExperiments(ctx, tenantID); err != nil {
+			return tools.ErrorResult(err.Error())
+		}
+		item, err = t.feature.store.claimNext(tenantID, t.kind, claimedBy, agentKey)
+		if err != nil {
+			return tools.ErrorResult(err.Error())
+		}
+	}
 	if item == nil {
 		idleLogStatus, err := t.feature.publishQueueIdleLog(ctx, t.kind, tenantID, originFromToolContext(ctx, args))
 		if err != nil {
@@ -298,11 +354,51 @@ func (t *boardTool) next(ctx context.Context, tenantID string, args map[string]a
 	if err := t.feature.publishWorkflowUpdate(ctx, item, "CLAIMED", ""); err != nil {
 		slog.Warn("skynet workflow update notification failed", "kind", t.kind, "item_id", item.ID, "error", err)
 	}
-	return jsonResult(map[string]any{
+	payload := map[string]any{
 		"status":       "claimed",
 		"item":         item,
 		"instructions": instructionsForKind(t.kind),
-	})
+	}
+	if t.kind == kindBacklog {
+		related, err := t.feature.store.relatedPending(tenantID, item, intArg(args, "related_limit"))
+		if err != nil {
+			return tools.ErrorResult(err.Error())
+		}
+		payload["related_items"] = related
+		if len(related) > 0 {
+			payload["batch_hint"] = "If these pending items are tightly related and can be implemented safely in one focused change, call skynet_backlog action \"claim_related\" with item_ids before editing. Otherwise ignore them and handle only the claimed item."
+		}
+	}
+	return jsonResult(payload)
+}
+
+func (t *boardTool) claimRelatedBacklog(ctx context.Context, tenantID string, args map[string]any) *tools.Result {
+	ids := itemIDsArg(args)
+	if len(ids) == 0 {
+		return tools.ErrorResult("item_ids is required")
+	}
+	agentKey := stringArg(args, "agent_key")
+	if agentKey == "" {
+		agentKey = tools.ToolAgentKeyFromCtx(ctx)
+	}
+	if agentKey == "" {
+		agentKey = defaultWorkerForKind(t.kind)
+	}
+	claimedBy := storepkg.SenderIDFromContext(ctx)
+	if claimedBy == "" {
+		claimedBy = "system:skynet"
+	}
+	items, err := t.feature.store.claimPendingByIDs(tenantID, kindBacklog, claimedBy, agentKey, ids)
+	if err != nil {
+		return tools.ErrorResult(err.Error())
+	}
+	for i := range items {
+		item := &items[i]
+		if err := t.feature.publishWorkflowUpdate(ctx, item, "CLAIMED RELATED", "claimed as part of a related backlog batch"); err != nil {
+			slog.Warn("skynet related backlog claim notification failed", "item_id", item.ID, "error", err)
+		}
+	}
+	return jsonResult(map[string]any{"status": "claimed_related", "items": items})
 }
 
 func (t *boardTool) update(ctx context.Context, tenantID string, args map[string]any, status, defaultResult string) *tools.Result {
@@ -327,25 +423,35 @@ func (t *boardTool) update(ctx context.Context, tenantID string, args map[string
 }
 
 func (t *boardTool) completeBacklogToQA(ctx context.Context, tenantID string, args map[string]any) *tools.Result {
-	itemID := stringArg(args, "item_id")
-	if itemID == "" {
-		return tools.ErrorResult("item_id is required")
+	itemIDs := itemIDsArg(args)
+	if len(itemIDs) == 0 {
+		return tools.ErrorResult("item_id or item_ids is required")
 	}
 	result := stringArg(args, "result")
 	if result == "" {
 		result = "coding completed"
 	}
-	item, err := t.feature.store.getItem(tenantID, itemID)
-	if err != nil {
-		return tools.ErrorResult(err.Error())
+	items := make([]*workflowItem, 0, len(itemIDs))
+	for _, itemID := range itemIDs {
+		item, err := t.feature.store.getItem(tenantID, itemID)
+		if err != nil {
+			return tools.ErrorResult(err.Error())
+		}
+		items = append(items, item)
 	}
+	primary := items[0]
 
 	var qaItems []workflowItem
-	qaItemID := strings.TrimSpace(item.Metadata["qa_item"])
+	qaItemID := strings.TrimSpace(primary.Metadata["qa_item"])
 	if qaItemID == "" {
+		var err error
+		itemLines := make([]string, 0, len(items))
+		for _, item := range items {
+			itemLines = append(itemLines, fmt.Sprintf("- %s\n%s", item.ID, item.Body))
+		}
 		qaText := fmt.Sprintf(`Verify backlog-completed work from %s.
 
-Backlog item:
+Backlog item(s):
 %s
 
 Implementation result:
@@ -355,19 +461,20 @@ QA requirements:
 - Inspect the target repository changes and any repo-root qa/ report created by the implementation worker.
 - Run focused verification for the changed behavior.
 - If behavior passes, call skynet_qa with action "pass" so PR composition is queued.
-- If behavior fails, call skynet_qa with action "fail_to_backlog" with exact reproduction evidence.`, item.ID, item.Body, result)
+- If behavior fails, call skynet_qa with action "fail_to_backlog" with exact reproduction evidence.`, primary.ID, strings.Join(itemLines, "\n\n"), result)
 		childMetadata := map[string]string{
 			"created_by_agent": tools.ToolAgentKeyFromCtx(ctx),
-			"source_backlog":   item.ID,
+			"source_backlog":   primary.ID,
+			"source_backlogs":  strings.Join(itemIDs, ","),
 			"transition":       "backlog_completed_to_qa",
 		}
-		if sourcePath := item.Metadata["source_path"]; sourcePath != "" {
+		if sourcePath := primary.Metadata["source_path"]; sourcePath != "" {
 			childMetadata["parent_source_path"] = sourcePath
 		}
-		if sourceLine := item.Metadata["source_line"]; sourceLine != "" {
+		if sourceLine := primary.Metadata["source_line"]; sourceLine != "" {
 			childMetadata["parent_source_line"] = sourceLine
 		}
-		qaItems, err = t.feature.store.addItems(tenantID, kindQA, []string{qaText}, originFromItem(item), "backlog-complete:"+item.ID, childMetadata)
+		qaItems, err = t.feature.store.addItems(tenantID, kindQA, []string{qaText}, originFromItem(primary), "backlog-complete:"+primary.ID, childMetadata)
 		if err != nil {
 			return tools.ErrorResult(err.Error())
 		}
@@ -380,21 +487,26 @@ QA requirements:
 	if qaItemID != "" && !strings.Contains(updateResult, qaItemID) {
 		updateResult = fmt.Sprintf("%s\n\nQueued QA item: %s", result, qaItemID)
 	}
-	updated, err := t.feature.store.updateStatus(tenantID, itemID, statusDone, updateResult, map[string]string{
-		"transition":       "backlog_completed_to_qa",
-		"updated_by_agent": tools.ToolAgentKeyFromCtx(ctx),
-		"qa_item_count":    fmt.Sprintf("%d", len(qaItems)),
-		"qa_item":          qaItemID,
-	})
-	if err != nil {
-		return tools.ErrorResult(err.Error())
-	}
-	if err := t.feature.publishWorkflowUpdate(ctx, updated, "DONE -> QA", updateResult); err != nil {
-		slog.Warn("skynet backlog completion-to-QA notification failed", "item_id", updated.ID, "error", err)
+	updatedItems := make([]workflowItem, 0, len(items))
+	for _, item := range items {
+		updated, err := t.feature.store.updateStatus(tenantID, item.ID, statusDone, updateResult, map[string]string{
+			"transition":       "backlog_completed_to_qa",
+			"updated_by_agent": tools.ToolAgentKeyFromCtx(ctx),
+			"qa_item_count":    fmt.Sprintf("%d", len(qaItems)),
+			"qa_item":          qaItemID,
+			"batch_items":      strings.Join(itemIDs, ","),
+		})
+		if err != nil {
+			return tools.ErrorResult(err.Error())
+		}
+		updatedItems = append(updatedItems, *updated)
+		if err := t.feature.publishWorkflowUpdate(ctx, updated, "DONE -> QA", updateResult); err != nil {
+			slog.Warn("skynet backlog completion-to-QA notification failed", "item_id", updated.ID, "error", err)
+		}
 	}
 	return jsonResult(map[string]any{
 		"status":   "queued_for_qa",
-		"item":     updated,
+		"items":    updatedItems,
 		"qa_items": qaItems,
 	})
 }
@@ -422,10 +534,16 @@ QA pass evidence:
 
 PR composition requirements:
 - Gather the changes connected to this QA item and its upstream backlog or experiment context.
+- Before declaring the work missing, inspect current worktrees, git log --all for expected files, branch containment for referenced commits, git stash list, tracked stash diffs, and untracked stash parents such as refs/stash^3. Use git ls-tree -r refs/stash^3 and git show refs/stash^3:<path> when untracked artifacts may hold the completed work.
+- If scoped artifacts are found in a stash, recover only those files into a clean PR branch and continue.
 - Cherry-pick finished commits when they exist; otherwise stage and commit only the coherent files for this scope.
 - Exclude unrelated dirty work and never revert user changes.
 - Run focused verification.
-- Create a GitHub PR if auth/remotes allow it, or produce a PR-ready title/body and exact blocker if creation is blocked.`, item.ID, item.Body, result)
+- Create a GitHub PR if auth/remotes allow it, or produce a PR-ready title/body and exact blocker if creation is blocked.
+- Never backslash-escape Markdown backtick characters in the PR title or body; preserve inline code and fenced code blocks as normal GitHub Markdown.
+- Prefer writing the PR body to a temporary Markdown file and using gh pr create --body-file so shell quoting does not force Markdown escaping or command substitution.
+- For important architecture PRs, include an Architecture section with Before and After Mermaid diagrams. Validate grammar before publishing: use a valid directive such as flowchart LR, graph TD, sequenceDiagram, stateDiagram-v2, or gantt; keep node IDs simple; quote labels with punctuation; close brackets/arrows; add dateFormat for gantt; and keep sequence participants/messages syntactically valid.
+- For frontend feature PRs, render the affected route/component and capture visual evidence with a browser or Playwright snapshot/screenshot, or an equivalent rendered artifact. Include the artifact path/link, viewport, and any render caveat in the PR body.`, item.ID, item.Body, result)
 	prItems, err := t.feature.store.addItems(tenantID, kindPR, []string{prText}, originFromItem(item), "qa-pass:"+item.ID, map[string]string{
 		"created_by_agent": tools.ToolAgentKeyFromCtx(ctx),
 		"source_qa_item":   item.ID,
@@ -476,7 +594,10 @@ func (t *boardTool) refineBacklog(ctx context.Context, tenantID string, args map
 	}
 
 	var childItems []workflowItem
+	var backlogChildren []workflowItem
+	var experimentChildren []workflowItem
 	if childText != "" {
+		backlogBullets, experimentBullets := partitionRefinementItems(parseBulletItems(childText))
 		childMetadata := map[string]string{
 			"created_by_agent": tools.ToolAgentKeyFromCtx(ctx),
 			"parent_item":      item.ID,
@@ -488,25 +609,47 @@ func (t *boardTool) refineBacklog(ctx context.Context, tenantID string, args map
 		if sourceLine := item.Metadata["source_line"]; sourceLine != "" {
 			childMetadata["parent_source_line"] = sourceLine
 		}
-		childItems, err = t.feature.store.addItems(
-			tenantID,
-			kindBacklog,
-			parseBulletItems(childText),
-			originFromItem(item),
-			"backlog-refinement:"+item.ID,
-			childMetadata,
-		)
-		if err != nil {
-			return tools.ErrorResult(err.Error())
+		if len(backlogBullets) > 0 {
+			backlogChildren, err = t.feature.store.addItems(
+				tenantID,
+				kindBacklog,
+				backlogBullets,
+				originFromItem(item),
+				"backlog-refinement:"+item.ID,
+				childMetadata,
+			)
+			if err != nil {
+				return tools.ErrorResult(err.Error())
+			}
+			childItems = append(childItems, backlogChildren...)
+		}
+		if len(experimentBullets) > 0 {
+			experimentMetadata := cloneStringMap(childMetadata)
+			experimentMetadata["transition"] = "backlog_refinement_to_experiment"
+			experimentMetadata["source_kind"] = "backlog_refinement_experiment"
+			experimentChildren, err = t.feature.store.addItems(
+				tenantID,
+				kindExperiment,
+				experimentBullets,
+				originFromItem(item),
+				"backlog-refinement-experiment:"+item.ID,
+				experimentMetadata,
+			)
+			if err != nil {
+				return tools.ErrorResult(err.Error())
+			}
+			childItems = append(childItems, experimentChildren...)
 		}
 	}
 	if result == "" {
 		result = fmt.Sprintf("Backlog item refined into %d child item(s).", len(childItems))
 	}
 	updated, err := t.feature.store.updateStatus(tenantID, itemID, statusRefinement, result, map[string]string{
-		"transition":          "backlog_refinement",
-		"updated_by_agent":    tools.ToolAgentKeyFromCtx(ctx),
-		"refined_child_count": fmt.Sprintf("%d", len(childItems)),
+		"transition":                     "backlog_refinement",
+		"updated_by_agent":               tools.ToolAgentKeyFromCtx(ctx),
+		"refined_child_count":            fmt.Sprintf("%d", len(childItems)),
+		"refined_backlog_child_count":    fmt.Sprintf("%d", len(backlogChildren)),
+		"refined_experiment_child_count": fmt.Sprintf("%d", len(experimentChildren)),
 	})
 	if err != nil {
 		return tools.ErrorResult(err.Error())
@@ -515,9 +658,11 @@ func (t *boardTool) refineBacklog(ctx context.Context, tenantID string, args map
 		slog.Warn("skynet backlog refinement notification failed", "item_id", updated.ID, "error", err)
 	}
 	return jsonResult(map[string]any{
-		"status":      statusRefinement,
-		"item":        updated,
-		"child_items": childItems,
+		"status":           statusRefinement,
+		"item":             updated,
+		"child_items":      childItems,
+		"backlog_items":    backlogChildren,
+		"experiment_items": experimentChildren,
 	})
 }
 
@@ -581,11 +726,28 @@ func (t *boardTool) requestExperimentReview(ctx context.Context, tenantID string
 			"status":  "review_pending_delivery",
 			"item":    updated,
 			"warning": err.Error(),
-			"message": experimentReviewMessage(updated, result),
+			"message": experimentReviewMessage(updated, result, t.feature.resolveTargetRepo(ctx)),
 		})
 	}
 	_ = item
 	return jsonResult(map[string]any{"status": "review_requested", "item": updated})
+}
+
+func (t *boardTool) publishExperimentReviewReminders(ctx context.Context, tenantID string, args map[string]any) *tools.Result {
+	limit := intArg(args, "limit")
+	published, total, err := t.feature.publishExperimentReviewReminders(ctx, tenantID, originFromToolContext(ctx, args), limit)
+	if err != nil {
+		return tools.ErrorResult(err.Error())
+	}
+	status := "no_review_items"
+	if published > 0 {
+		status = "review_reminder_published"
+	}
+	return jsonResult(map[string]any{
+		"status":          status,
+		"published_count": published,
+		"review_count":    total,
+	})
 }
 
 func (t *boardTool) approveExperimentToBacklog(ctx context.Context, tenantID string, args map[string]any) *tools.Result {
@@ -681,6 +843,7 @@ func (t *ciFailureTool) Parameters() map[string]any {
 			"channel":      map[string]any{"type": "string"},
 			"chat_id":      map[string]any{"type": "string"},
 			"local_key":    map[string]any{"type": "string"},
+			"peer_kind":    map[string]any{"type": "string"},
 		},
 		"required": []string{"log"},
 	}
@@ -697,14 +860,69 @@ func (t *ciFailureTool) Execute(ctx context.Context, args map[string]any) *tools
 		}
 	}
 	message := buildCIFailureMessage(t.feature.resolveTargetRepo(ctx), logText, args)
-	if err := t.feature.dispatchAgent(ctx, agentKeyCIFixer, message, originFromToolContext(ctx, args)); err != nil {
+	origin := originFromToolContext(ctx, args)
+	if err := t.feature.dispatchAgent(ctx, agentKeyCIFixer, message, origin); err != nil {
 		return tools.ErrorResult(err.Error())
 	}
+	t.feature.publishCIFailureDispatchLog(ctx, args, origin)
 	return jsonResult(map[string]any{"status": "dispatched", "agent": agentKeyCIFixer})
 }
 
 type feedbackPlanTool struct {
 	feature *SkynetWorkflowsFeature
+}
+
+type prConflictTool struct {
+	feature *SkynetWorkflowsFeature
+}
+
+func (t *prConflictTool) Name() string { return "skynet_pr_conflict" }
+
+func (t *prConflictTool) Description() string {
+	return "Trigger the Skynet PR conflict resolver from GitHub merge-state data for green or otherwise active pull requests that cannot merge cleanly."
+}
+
+func (t *prConflictTool) Parameters() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"action":       map[string]any{"type": "string", "enum": []string{"trigger"}},
+			"repository":   map[string]any{"type": "string"},
+			"pull_request": map[string]any{"type": "string"},
+			"title":        map[string]any{"type": "string"},
+			"url":          map[string]any{"type": "string"},
+			"branch":       map[string]any{"type": "string"},
+			"base_branch":  map[string]any{"type": "string"},
+			"commit":       map[string]any{"type": "string"},
+			"base_sha":     map[string]any{"type": "string"},
+			"author":       map[string]any{"type": "string"},
+			"merge_state":  map[string]any{"type": "string"},
+			"checks":       map[string]any{"type": "string"},
+			"target_repo":  map[string]any{"type": "string"},
+			"channel":      map[string]any{"type": "string"},
+			"chat_id":      map[string]any{"type": "string"},
+			"local_key":    map[string]any{"type": "string"},
+			"peer_kind":    map[string]any{"type": "string"},
+			"force":        map[string]any{"type": "boolean", "description": "Dispatch even if this PR conflict fingerprint was already seen."},
+		},
+		"required": []string{"pull_request"},
+	}
+}
+
+func (t *prConflictTool) Execute(ctx context.Context, args map[string]any) *tools.Result {
+	if stringArg(args, "pull_request", "url") == "" {
+		return tools.ErrorResult("pull_request or url is required")
+	}
+	if targetRepo := stringArg(args, "target_repo"); targetRepo != "" {
+		if err := t.feature.setTargetRepo(ctx, targetRepo); err != nil {
+			return tools.ErrorResult(err.Error())
+		}
+	}
+	status, err := t.feature.dispatchPRConflictResolver(ctx, args, originFromToolContext(ctx, args))
+	if err != nil {
+		return tools.ErrorResult(err.Error())
+	}
+	return jsonResult(map[string]any{"status": status, "agent": agentKeyPRConflictResolver})
 }
 
 func (t *feedbackPlanTool) Name() string { return "skynet_feedback_plan" }
@@ -858,6 +1076,124 @@ func (f *SkynetWorkflowsFeature) dispatchAgent(ctx context.Context, agentKey, co
 	return nil
 }
 
+func (f *SkynetWorkflowsFeature) publishCIFailureDispatchLog(ctx context.Context, args map[string]any, origin workflowOrigin) {
+	if f == nil || f.msgBus == nil {
+		return
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		origin = f.configuredOrigin(ctx)
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		return
+	}
+	chatID := origin.ChatID
+	if origin.LocalKey != "" {
+		chatID = origin.LocalKey
+	}
+	metadata := map[string]string{
+		"skynet_workflow": "true",
+	}
+	if origin.LocalKey != "" {
+		metadata["local_key"] = origin.LocalKey
+		if threadID := threadIDFromLocalKey(origin.LocalKey); threadID != "" {
+			metadata[tools.MetaMessageThreadID] = threadID
+		}
+	}
+	if !f.msgBus.TryPublishOutbound(bus.OutboundMessage{
+		Channel:  origin.Channel,
+		ChatID:   chatID,
+		Content:  ciFailureDispatchLogMessage(args),
+		Metadata: metadata,
+	}) {
+		slog.Warn("beta skynet_workflows: CI fixer dispatch log dropped; outbound buffer is full")
+	}
+}
+
+func (f *SkynetWorkflowsFeature) dispatchPRConflictResolver(ctx context.Context, args map[string]any, origin workflowOrigin) (string, error) {
+	if f == nil {
+		return "", fmt.Errorf("skynet workflows feature is unavailable")
+	}
+	if !boolArg(args, "force") {
+		duplicate, err := f.prConflictAlreadyDispatched(ctx, args)
+		if err != nil {
+			slog.Warn("skynet PR conflict dedupe check failed", "error", err)
+		}
+		if duplicate {
+			return "skipped_duplicate", nil
+		}
+	}
+	message := buildPRConflictMessage(f.resolveTargetRepo(ctx), args)
+	if err := f.dispatchAgent(ctx, agentKeyPRConflictResolver, message, origin); err != nil {
+		return "", err
+	}
+	f.publishPRConflictDispatchLog(ctx, args, origin)
+	if err := f.markPRConflictDispatched(ctx, args); err != nil {
+		slog.Warn("skynet PR conflict dedupe mark failed", "error", err)
+	}
+	return "dispatched", nil
+}
+
+func (f *SkynetWorkflowsFeature) prConflictAlreadyDispatched(ctx context.Context, args map[string]any) (bool, error) {
+	if f == nil || f.sysConfigs == nil {
+		return false, nil
+	}
+	key := prConflictConfigKey(args)
+	fingerprint := prConflictFingerprint(args)
+	if key == "" || fingerprint == "" {
+		return false, nil
+	}
+	value, err := f.sysConfigs.Get(ctx, key)
+	if err != nil {
+		return false, nil
+	}
+	return strings.TrimSpace(value) == fingerprint, nil
+}
+
+func (f *SkynetWorkflowsFeature) markPRConflictDispatched(ctx context.Context, args map[string]any) error {
+	if f == nil || f.sysConfigs == nil {
+		return nil
+	}
+	key := prConflictConfigKey(args)
+	fingerprint := prConflictFingerprint(args)
+	if key == "" || fingerprint == "" {
+		return nil
+	}
+	return f.sysConfigs.Set(ctx, key, fingerprint)
+}
+
+func (f *SkynetWorkflowsFeature) publishPRConflictDispatchLog(ctx context.Context, args map[string]any, origin workflowOrigin) {
+	if f == nil || f.msgBus == nil {
+		return
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		origin = f.configuredOrigin(ctx)
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		return
+	}
+	chatID := origin.ChatID
+	if origin.LocalKey != "" {
+		chatID = origin.LocalKey
+	}
+	metadata := map[string]string{
+		"skynet_workflow": "true",
+	}
+	if origin.LocalKey != "" {
+		metadata["local_key"] = origin.LocalKey
+		if threadID := threadIDFromLocalKey(origin.LocalKey); threadID != "" {
+			metadata[tools.MetaMessageThreadID] = threadID
+		}
+	}
+	if !f.msgBus.TryPublishOutbound(bus.OutboundMessage{
+		Channel:  origin.Channel,
+		ChatID:   chatID,
+		Content:  prConflictDispatchLogMessage(args),
+		Metadata: metadata,
+	}) {
+		slog.Warn("beta skynet_workflows: PR conflict dispatch log dropped; outbound buffer is full")
+	}
+}
+
 func (f *SkynetWorkflowsFeature) publishExperimentReview(ctx context.Context, item *workflowItem, result string) error {
 	if f.msgBus == nil {
 		return fmt.Errorf("message bus is unavailable")
@@ -883,10 +1219,62 @@ func (f *SkynetWorkflowsFeature) publishExperimentReview(ctx context.Context, it
 	f.msgBus.PublishOutbound(bus.OutboundMessage{
 		Channel:  origin.Channel,
 		ChatID:   chatID,
-		Content:  experimentReviewMessage(item, result),
+		Content:  experimentReviewMessage(item, result, f.resolveTargetRepo(ctx)),
 		Metadata: metadata,
 	})
 	return nil
+}
+
+func (f *SkynetWorkflowsFeature) publishExperimentReviewReminders(ctx context.Context, tenantID string, origin workflowOrigin, limit int) (int, int, error) {
+	if limit <= 0 || limit > 20 {
+		limit = 10
+	}
+	items, err := f.store.listItems(tenantID, kindExperiment, statusReview, limit)
+	if err != nil {
+		return 0, 0, err
+	}
+	total := len(items)
+	if counts, err := f.store.counts(tenantID); err == nil {
+		for _, entry := range counts {
+			if entry.Kind == kindExperiment {
+				total = entry.Review
+				break
+			}
+		}
+	}
+	if len(items) == 0 {
+		return 0, total, nil
+	}
+	if f.msgBus == nil {
+		return 0, total, fmt.Errorf("message bus is unavailable")
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		origin = f.configuredOrigin(ctx)
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		origin = originFromItem(&items[0])
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		return 0, total, fmt.Errorf("review channel is not configured")
+	}
+	chatID := origin.ChatID
+	if origin.LocalKey != "" {
+		chatID = origin.LocalKey
+	}
+	metadata := map[string]string{}
+	if origin.LocalKey != "" {
+		metadata["local_key"] = origin.LocalKey
+		if threadID := threadIDFromLocalKey(origin.LocalKey); threadID != "" {
+			metadata[tools.MetaMessageThreadID] = threadID
+		}
+	}
+	f.msgBus.PublishOutbound(bus.OutboundMessage{
+		Channel:  origin.Channel,
+		ChatID:   chatID,
+		Content:  experimentReviewReminderMessage(items, total, f.resolveTargetRepo(ctx), time.Now().UTC()),
+		Metadata: metadata,
+	})
+	return len(items), total, nil
 }
 
 func (f *SkynetWorkflowsFeature) publishWorkflowUpdate(ctx context.Context, item *workflowItem, transition, result string) error {
@@ -1042,18 +1430,166 @@ func configKeyQueueIdleLog(kind string) string {
 	return "beta.skynet_workflows.last_idle_log." + strings.TrimSpace(kind)
 }
 
-func experimentReviewMessage(item *workflowItem, result string) string {
-	return fmt.Sprintf(`[SKYNET EXPERIMENT REVIEW]
+func experimentReviewMessage(item *workflowItem, result, targetRepo string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `[SKYNET EXPERIMENT REVIEW]
 Item: %s
 
 Experiment:
 %s
 
+`, item.ID, item.Body)
+	appendExperimentAccessLinks(&b, *item, targetRepo)
+	fmt.Fprintf(&b, `
 Result:
 %s
 
 Reply with approval to transition this into backlog, or send revision feedback to keep iterating.
-`, item.ID, item.Body, result)
+`, result)
+	return b.String()
+}
+
+func experimentReviewReminderMessage(items []workflowItem, total int, targetRepo string, now time.Time) string {
+	if total <= 0 {
+		total = len(items)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "🟨 **SKYNET EXPERIMENT REVIEW REMINDER**\nPending experiment reviews: %d\n", total)
+	fmt.Fprintf(&b, "This reminder repeats every 5 minutes until review items are accepted, revised, dropped, or otherwise moved out of review.\n")
+	for i, item := range items {
+		fmt.Fprintf(&b, "\n%d. **%s**\nItem: `%s`\nSource: `%s`\n", i+1, experimentReviewTitle(item), item.ID, item.Source)
+		if !item.UpdatedAt.IsZero() {
+			fmt.Fprintf(&b, "Waiting since: `%s UTC`", item.UpdatedAt.UTC().Format("2006-01-02 15:04"))
+			if now.After(item.UpdatedAt) {
+				fmt.Fprintf(&b, " (%s)", now.Sub(item.UpdatedAt).Round(time.Minute))
+			}
+			b.WriteByte('\n')
+		}
+		appendExperimentAccessLinks(&b, item, targetRepo)
+		b.WriteString("Decision needed: approve to backlog, request revision, or drop.\n")
+	}
+	if len(items) < total {
+		fmt.Fprintf(&b, "\nShowing %d of %d review items.", len(items), total)
+	}
+	return b.String()
+}
+
+func appendExperimentAccessLinks(b *strings.Builder, item workflowItem, targetRepo string) {
+	readmePath := experimentReadmePath(item)
+	if readmePath != "" {
+		if link := repoGitHubFileURL(targetRepo, readmePath); link != "" {
+			fmt.Fprintf(b, "README: [%s](%s)\n", readmePath, link)
+		} else {
+			fmt.Fprintf(b, "README: `%s`\n", readmePath)
+		}
+	}
+	mockPath := experimentMockPath(item)
+	if mockPath != "" {
+		if link := repoGitHubFileURL(targetRepo, mockPath); link != "" {
+			fmt.Fprintf(b, "Mock: [%s](%s)\n", mockPath, link)
+		} else {
+			fmt.Fprintf(b, "Mock: `%s`\n", mockPath)
+		}
+	}
+	if slug := experimentSlug(item); slug != "" {
+		fmt.Fprintf(b, "Route: `/experiments/%s`\n", slug)
+	}
+}
+
+func experimentReviewTitle(item workflowItem) string {
+	for _, line := range strings.Split(item.Body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			if idx := strings.Index(line, "]"); idx > 0 {
+				title := strings.TrimSpace(line[idx+1:])
+				if title != "" {
+					return title
+				}
+			}
+		}
+		if len(line) > 120 {
+			return line[:120] + "..."
+		}
+		return line
+	}
+	return item.ID
+}
+
+func experimentReadmePath(item workflowItem) string {
+	if path := cleanRepoRelPath(item.Metadata["experiment_readme"]); path != "" {
+		return path
+	}
+	for _, line := range strings.Split(item.Body, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			if idx := strings.Index(line, "]"); idx > 0 {
+				if path := cleanRepoRelPath(line[1:idx]); path != "" {
+					return path
+				}
+			}
+		}
+		if path := strings.TrimSpace(strings.TrimPrefix(line, "Path:")); path != line {
+			if dir := cleanRepoRelPath(path); dir != "" {
+				return strings.TrimSuffix(dir, "/") + "/README.md"
+			}
+		}
+	}
+	if dir := experimentDirPath(item); dir != "" {
+		return strings.TrimSuffix(dir, "/") + "/README.md"
+	}
+	return ""
+}
+
+func experimentMockPath(item workflowItem) string {
+	if dir := experimentDirPath(item); dir != "" {
+		return strings.TrimSuffix(dir, "/") + "/Mock.tsx"
+	}
+	return ""
+}
+
+func experimentDirPath(item workflowItem) string {
+	if path := cleanRepoRelPath(item.Metadata["experiment_path"]); path != "" {
+		return path
+	}
+	readme := cleanRepoRelPath(item.Metadata["experiment_readme"])
+	if readme == "" {
+		readme = experimentReadmePathFromBody(item.Body)
+	}
+	if readme != "" {
+		return strings.TrimSuffix(filepath.ToSlash(filepath.Dir(readme)), ".")
+	}
+	for _, line := range strings.Split(item.Body, "\n") {
+		line = strings.TrimSpace(line)
+		if path := strings.TrimSpace(strings.TrimPrefix(line, "Path:")); path != line {
+			return cleanRepoRelPath(path)
+		}
+	}
+	return ""
+}
+
+func experimentReadmePathFromBody(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			if idx := strings.Index(line, "]"); idx > 0 {
+				return cleanRepoRelPath(line[1:idx])
+			}
+		}
+	}
+	return ""
+}
+
+func experimentSlug(item workflowItem) string {
+	if slug := strings.TrimSpace(item.Metadata["experiment_slug"]); slug != "" {
+		return slug
+	}
+	if dir := experimentDirPath(item); dir != "" {
+		return filepath.Base(dir)
+	}
+	return ""
 }
 
 func originFromToolContext(ctx context.Context, args map[string]any) workflowOrigin {
@@ -1115,9 +1651,9 @@ func defaultWorkerForKind(kind string) string {
 func instructionsForKind(kind string) string {
 	switch kind {
 	case kindBacklog:
-		return "Validate the backlog item. If it is a broad rollup, milestone, stale, or missing acceptance criteria, use skynet_backlog action \"refine\" with child backlog bullets. If actionable, implement it in the target repository, run focused verification, write or update the QA report, then complete or fail the item with skynet_backlog. Complete queues QA automatically."
+		return "Validate the backlog item. Review related_items and, only if they are tightly related, claim them with skynet_backlog action \"claim_related\" before editing. If the work is a broad rollup, milestone, stale, or missing acceptance criteria, use action \"refine\" with child backlog bullets. If actionable, implement it in the target repository, run focused verification, write or update the QA report, then complete the item or batch with item_id/item_ids. Complete queues QA automatically."
 	case kindExperiment:
-		return "Build or update a sandbox experiment, validate it, then request channel review with skynet_experiments."
+		return "Read the linked experiment README/Mock/registry entry, build or validate the sandbox experiment, append findings as needed, then request channel review with skynet_experiments. If user feedback explicitly accepts the experiment, use approve_to_backlog."
 	case kindQA:
 		return "Verify the QA item. Pass it if behavior is correct; this queues skynet_pr work automatically. Otherwise use fail_to_backlog with exact failure evidence."
 	case kindPR:
@@ -1143,4 +1679,142 @@ Failure log:
 
 Inspect the target repository, reproduce or narrow the failure, patch only the scoped CI fix files, run focused verification, commit the scoped fix, and push the PR branch when auth/remotes allow it. Preserve unrelated dirty work. Report the files changed, verification result, branch, and pushed commit. If a safe fix or push is not possible, add a backlog item with the exact blocker and evidence.
 `, targetRepo, stringArg(args, "repository"), stringArg(args, "pull_request"), stringArg(args, "branch"), stringArg(args, "commit"), stringArg(args, "author"), stringArg(args, "run_url"), logText)
+}
+
+func buildPRConflictMessage(targetRepo string, args map[string]any) string {
+	return fmt.Sprintf(`[Skynet PR Merge Conflict]
+
+Target repository: %s
+Repository: %s
+Pull request: %s
+Title: %s
+URL: %s
+Base branch: %s
+Base SHA: %s
+PR branch: %s
+Head commit: %s
+Author: %s
+Merge state: %s
+Checks: %s
+
+This PR has a merge conflict. Resolve it even if CI/Lighthouse checks are already green.
+
+Conflict-resolution requirements:
+- Fetch the latest base branch and PR branch.
+- Do not resolve inside a dirty target checkout. Create and use a per-PR clean git worktree next to the target repository, for example ../ResearchCrafters-conflict-pr-12.
+- Check out the PR branch in that clean worktree without disturbing unrelated local work.
+- Merge or rebase the base branch into the PR branch using the repository's normal practice.
+- Resolve only conflict files and direct fallout from the merge.
+- Prefer the base branch for shared CI/CD workflow/process harness changes unless the PR intentionally changes them.
+- Preserve the feature behavior and QA evidence from the PR branch.
+- Run focused verification for conflict areas and a lightweight health check when practical.
+- Commit and push the resolved PR branch if auth/remotes allow it.
+- Report conflict files, resolution choices, verification, branch, pushed commit, and worktree path. If safe resolution or push is blocked, add a backlog item with exact blocker evidence.
+`, targetRepo, stringArg(args, "repository"), stringArg(args, "pull_request"), stringArg(args, "title"), stringArg(args, "url"), stringArg(args, "base_branch"), stringArg(args, "base_sha"), stringArg(args, "branch"), stringArg(args, "commit"), stringArg(args, "author"), stringArg(args, "merge_state"), stringArg(args, "checks"))
+}
+
+func ciFailureDispatchLogMessage(args map[string]any) string {
+	lines := []string{
+		"[SKYNET CI FIXER DISPATCHED]",
+		"Agent: " + agentKeyCIFixer,
+	}
+	for _, entry := range []struct {
+		label string
+		keys  []string
+	}{
+		{label: "Pull request", keys: []string{"pull_request"}},
+		{label: "Branch", keys: []string{"branch"}},
+		{label: "Commit", keys: []string{"commit"}},
+		{label: "Run", keys: []string{"run_url"}},
+	} {
+		if value := stringArg(args, entry.keys...); value != "" {
+			lines = append(lines, entry.label+": "+value)
+		}
+	}
+	lines = append(lines, "Status: accepted by GoClaw; agent is starting.")
+	return strings.Join(lines, "\n")
+}
+
+func prConflictDispatchLogMessage(args map[string]any) string {
+	lines := []string{
+		"[SKYNET PR CONFLICT RESOLVER DISPATCHED]",
+		"Agent: " + agentKeyPRConflictResolver,
+	}
+	for _, entry := range []struct {
+		label string
+		keys  []string
+	}{
+		{label: "Pull request", keys: []string{"pull_request"}},
+		{label: "Title", keys: []string{"title"}},
+		{label: "Base", keys: []string{"base_branch"}},
+		{label: "Branch", keys: []string{"branch"}},
+		{label: "Head", keys: []string{"commit"}},
+		{label: "Checks", keys: []string{"checks"}},
+		{label: "URL", keys: []string{"url"}},
+	} {
+		if value := stringArg(args, entry.keys...); value != "" {
+			lines = append(lines, entry.label+": "+value)
+		}
+	}
+	lines = append(lines, "Status: accepted by GoClaw; conflict resolver is starting.")
+	return strings.Join(lines, "\n")
+}
+
+func prConflictFingerprint(args map[string]any) string {
+	parts := []string{
+		stringArg(args, "repository"),
+		normalizePullRequest(stringArg(args, "pull_request")),
+		stringArg(args, "base_branch"),
+		stringArg(args, "base_sha"),
+		stringArg(args, "branch"),
+		stringArg(args, "commit"),
+		strings.ToUpper(stringArg(args, "merge_state")),
+	}
+	return strings.Join(parts, "|")
+}
+
+func prConflictConfigKey(args map[string]any) string {
+	repo := configKeyPart(stringArg(args, "repository"))
+	pr := configKeyPart(normalizePullRequest(stringArg(args, "pull_request")))
+	if repo == "" && pr == "" {
+		return ""
+	}
+	if repo == "" {
+		repo = "unknown-repo"
+	}
+	if pr == "" {
+		pr = "unknown-pr"
+	}
+	return "beta.skynet_workflows.pr_conflict." + repo + "." + pr
+}
+
+func normalizePullRequest(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(value, "#")
+	if idx := strings.LastIndex(value, "/pull/"); idx >= 0 {
+		value = value[idx+len("/pull/"):]
+	}
+	return strings.TrimSpace(value)
+}
+
+func configKeyPart(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	lastSep := false
+	for _, r := range value {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
+		if ok {
+			b.WriteRune(r)
+			lastSep = false
+			continue
+		}
+		if !lastSep {
+			b.WriteByte('_')
+			lastSep = true
+		}
+	}
+	return strings.Trim(b.String(), "_")
 }

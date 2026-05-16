@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -932,9 +933,7 @@ func runGateway() {
 	pgStores.Cron.SetOnEvent(func(event store.CronEvent) {
 		server.BroadcastEvent(*protocol.NewEvent(protocol.EventCron, event))
 	})
-	if err := pgStores.Cron.Start(); err != nil {
-		slog.Warn("cron service failed to start", "error", err)
-	}
+	startCronAfterGatewayReady(ctx, pgStores.Cron, loopbackAddr(cfg.Gateway.Host, cfg.Gateway.Port))
 
 	// Start heartbeat ticker (routes through scheduler's cron lane)
 	heartbeatTicker := heartbeat.NewTicker(heartbeat.TickerConfig{
@@ -1286,6 +1285,53 @@ func runGateway() {
 	if err := server.Start(ctx); err != nil {
 		slog.Error("gateway error", "error", err)
 		os.Exit(1)
+	}
+}
+
+func startCronAfterGatewayReady(ctx context.Context, cronStore store.CronStore, gatewayAddr string) {
+	go func() {
+		if !waitForGatewayHealth(ctx, gatewayAddr, 2*time.Minute) {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Warn("cron service starting before gateway health check passed", "addr", gatewayAddr)
+		}
+		if err := cronStore.Start(); err != nil {
+			slog.Warn("cron service failed to start", "error", err)
+		}
+	}()
+}
+
+func waitForGatewayHealth(ctx context.Context, gatewayAddr string, timeout time.Duration) bool {
+	if gatewayAddr == "" {
+		return true
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	client := &http.Client{Timeout: time.Second}
+	url := "http://" + gatewayAddr + "/health"
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err == nil {
+			resp, err := client.Do(req)
+			if err == nil {
+				_ = resp.Body.Close()
+				if resp.StatusCode >= 200 && resp.StatusCode < 500 {
+					return true
+				}
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return false
+		case <-ticker.C:
+		}
 	}
 }
 

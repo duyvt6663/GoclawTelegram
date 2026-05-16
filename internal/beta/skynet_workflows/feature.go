@@ -25,10 +25,13 @@ const (
 	configKeyLocalKey   = "beta.skynet_workflows.local_key"
 	configKeyPeerKind   = "beta.skynet_workflows.peer_kind"
 	configKeyTargetRepo = "beta.skynet_workflows.target_repo"
+	configKeyDeployRepo = "beta.skynet_workflows.main_deploy_repo"
+	configKeyWebPort    = "beta.skynet_workflows.web_port"
 
 	agentKeySkynet             = "skynet"
 	agentKeyBuilderBot         = "builder-bot"
 	agentKeyCIFixer            = "skynet-ci-fixer"
+	agentKeyPRConflictResolver = "skynet-pr-conflict-resolver"
 	agentKeyBacklogIterator    = "skynet-backlog-iterator"
 	agentKeyExperimentIterator = "skynet-experiment-iterator"
 	agentKeyExperimentBacklog  = "skynet-experiment-to-backlog"
@@ -51,6 +54,8 @@ var skynetWorkflowTools = []string{
 	"skynet_qa",
 	"skynet_pr",
 	"skynet_ci_failure",
+	"skynet_pr_conflict",
+	"skynet_main_sync",
 	"skynet_feedback_plan",
 }
 
@@ -128,6 +133,8 @@ func (f *SkynetWorkflowsFeature) Init(deps beta.Deps) error {
 		deps.ToolRegistry.Register(&boardTool{feature: f, name: "skynet_qa", kind: kindQA})
 		deps.ToolRegistry.Register(&boardTool{feature: f, name: "skynet_pr", kind: kindPR})
 		deps.ToolRegistry.Register(&ciFailureTool{feature: f})
+		deps.ToolRegistry.Register(&prConflictTool{feature: f})
+		deps.ToolRegistry.Register(&mainSyncTool{feature: f})
 		deps.ToolRegistry.Register(&feedbackPlanTool{feature: f})
 	}
 	if deps.Server != nil {
@@ -162,6 +169,9 @@ func (f *SkynetWorkflowsFeature) resolveTargetRepo(ctx context.Context) string {
 			return strings.TrimSpace(value)
 		}
 	}
+	if strings.TrimSpace(f.targetRepo) != "" {
+		return strings.TrimSpace(f.targetRepo)
+	}
 	if f.workspace != "" {
 		return f.workspace
 	}
@@ -179,6 +189,35 @@ func (f *SkynetWorkflowsFeature) setTargetRepo(ctx context.Context, targetRepo s
 	f.targetRepo = targetRepo
 	if f.sysConfigs != nil {
 		if err := f.sysConfigs.Set(ctx, configKeyTargetRepo, targetRepo); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *SkynetWorkflowsFeature) setDeployRepo(ctx context.Context, deployRepo string) error {
+	deployRepo = strings.TrimSpace(deployRepo)
+	if deployRepo == "" {
+		return nil
+	}
+	if f.sysConfigs != nil {
+		if err := f.sysConfigs.Set(ctx, configKeyDeployRepo, deployRepo); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *SkynetWorkflowsFeature) setWebPort(ctx context.Context, webPort string) error {
+	webPort = strings.TrimSpace(webPort)
+	if webPort == "" {
+		return nil
+	}
+	if !safePort(webPort) {
+		return fmt.Errorf("unsafe web port: %q", webPort)
+	}
+	if f.sysConfigs != nil {
+		if err := f.sysConfigs.Set(ctx, configKeyWebPort, webPort); err != nil {
 			return err
 		}
 	}
@@ -206,6 +245,18 @@ func (f *SkynetWorkflowsFeature) workflowAgentSpecs(ctx context.Context) []workf
 			Workspace:         targetWorkspace,
 			Tools:             codingTools,
 			Role:              "ci-fixer",
+		},
+		{
+			Key:               agentKeyPRConflictResolver,
+			DisplayName:       "Skynet PR Conflict Resolver",
+			Frontmatter:       "Pull-request conflict responder that updates conflicted PR branches against the base branch, resolves merge conflicts, verifies, pushes, and reports the result.",
+			ProviderKind:      storepkg.ProviderClaudeCLI,
+			Model:             modelClaudeSonnet,
+			ReasoningEffort:   reasoningHigh,
+			MaxToolIterations: 24,
+			Workspace:         targetWorkspace,
+			Tools:             codingTools,
+			Role:              "pr-conflict-resolver",
 		},
 		{
 			Key:               agentKeyBacklogIterator,
@@ -444,8 +495,10 @@ func workflowToolNameHint() string {
 - %s for skynet_qa
 - %s for skynet_pr
 - %s for skynet_ci_failure
+- %s for skynet_pr_conflict
+- %s for skynet_main_sync
 - %s for skynet_feedback_plan
-`, mcpToolName("skynet_backlog"), mcpToolName("skynet_experiments"), mcpToolName("skynet_qa"), mcpToolName("skynet_pr"), mcpToolName("skynet_ci_failure"), mcpToolName("skynet_feedback_plan"))
+`, mcpToolName("skynet_backlog"), mcpToolName("skynet_experiments"), mcpToolName("skynet_qa"), mcpToolName("skynet_pr"), mcpToolName("skynet_ci_failure"), mcpToolName("skynet_pr_conflict"), mcpToolName("skynet_main_sync"), mcpToolName("skynet_feedback_plan"))
 }
 
 func (f *SkynetWorkflowsFeature) contextFilesForSpec(spec workflowAgentSpec, workspace string) map[string]string {
@@ -460,6 +513,8 @@ Tools:
 - Use skynet_qa for QA queue items and QA-to-backlog transitions.
 - Use skynet_pr for post-QA PR composition and completion tracking.
 - Use skynet_ci_failure only for CI/CD failure intake.
+- Use skynet_pr_conflict only for GitHub PR merge-conflict intake.
+- Use skynet_main_sync only for local main deployment refresh after main branch updates.
 - Use skynet_feedback_plan only for user feedback planning intake.
 
 %s
@@ -484,20 +539,32 @@ Operational rules:
 5. If verification passes and git remotes/auth allow it, stage only the scoped CI fix files, commit them, and push the PR branch. If push is blocked, leave the commit ready and report the exact blocker plus command to run.
 6. Summarize files changed, verification, branch, and pushed commit. If the fix cannot be completed safely, add a backlog item with the exact blocker and evidence.
 `
+	case "pr-conflict-resolver":
+		roleRules = `PR conflict resolver flow:
+1. Inspect the conflict payload, target repository, PR branch, and base branch.
+2. Never resolve conflicts directly inside a dirty target checkout. Create a per-PR clean git worktree next to the target repository, for example ../ResearchCrafters-conflict-pr-12, and do all branch switching there.
+3. Fetch the latest remotes in that worktree, check out the PR branch, then merge or rebase the latest base branch according to the repository's existing practice.
+4. Resolve only merge conflicts and direct fallout from that merge. Preserve feature intent from the PR branch and process/harness updates from the base branch.
+5. Run focused verification for touched areas plus a lightweight repository health check when practical.
+6. Commit and push the conflict-resolution branch when auth/remotes allow it. If push is blocked, leave the commit ready and report exact commands/blockers.
+7. Summarize conflict files, resolution choices, verification, branch, pushed commit, and worktree path. If resolution cannot be completed safely, add a backlog item with the exact blocker and evidence.
+`
 	case "backlog-iterator":
 		roleRules = `Backlog flow:
 1. Call skynet_backlog with action "next".
 2. If no item is returned, stop.
-3. Validate readiness by reading linked docs, experiments/archive notes, prior QA, and current code paths.
-4. If the item is a broad rollup, milestone, stale, missing acceptance criteria, or needs an experiment/spike first, call skynet_backlog with action "refine". Put concrete implementation-sized child bullets in "text" and explain the dependency/order in "result". Do not use "fail" for refinement.
-5. If the item is actionable, implement, run focused verification, write or update the repo-root QA report, then call skynet_backlog with action "complete" or "fail". The complete action queues QA automatically; use "fail" only for an attempted implementation that cannot be completed safely.
+3. Review any "related_items" returned by the tool. If nearby pending bullets are tightly related and can be completed safely in one focused change, call skynet_backlog with action "claim_related" and "item_ids" before editing. Otherwise ignore them.
+4. Validate readiness by reading linked docs, experiments/archive notes, prior QA, and current code paths.
+5. If the item is a broad rollup, milestone, stale, missing acceptance criteria, or needs an experiment/spike first, call skynet_backlog with action "refine". Put concrete implementation-sized child bullets in "text" and explain the dependency/order in "result"; prefix pure experiment-validation children with "Experiment leaf:" so they route to skynet_experiments. Do not use "fail" for refinement.
+6. If the item or claimed batch is actionable, implement, run focused verification, write or update the repo-root QA report, then call skynet_backlog with action "complete" using "item_ids" for a batch or "item_id" for one item. The complete action queues QA automatically; use "fail" only for an attempted implementation that cannot be completed safely.
 `
 	case "experiment-iterator":
 		roleRules = `Experiment flow:
 1. Call skynet_experiments with action "next".
-2. Build or update the sandbox experiment, validate interaction manually or with tests, and do not promote production code unless the item explicitly asks for promotion.
-3. Call skynet_experiments with action "request_review" and include the experiment path, validation result, and clear review prompt.
-4. If review feedback arrives later, iterate on that same experiment instead of starting a new production feature.
+2. For repo-synced experiments, read the linked README, Mock.tsx, and registry entry before editing.
+3. Build or update the sandbox experiment, validate interaction manually or with tests, and do not promote production code unless the item explicitly asks for promotion.
+4. Call skynet_experiments with action "request_review" and include the experiment path, validation result, and clear review prompt.
+5. If review feedback arrives later, iterate on that same experiment instead of starting a new production feature. If the user explicitly accepts the experiment, call skynet_experiments with action "approve_to_backlog".
 `
 	case "experiment-to-backlog":
 		roleRules = `Experiment transition flow:
@@ -516,11 +583,18 @@ Operational rules:
 		roleRules = `PR composition flow:
 1. Call skynet_pr with action "next".
 2. If no item is returned, stop.
-3. Read the QA evidence and inspect the target repository git status, branches, commits, and relevant queue context.
-4. Build a coherent PR branch from the completed work. Prefer cherry-picking finished commits when they exist; otherwise stage and commit only files belonging to the passed QA scope. Do not include unrelated dirty files or revert user work.
-5. Run focused verification for the PR contents.
-6. Create a GitHub PR if existing auth/remotes allow it. If PR creation is blocked, leave a branch/commit plus PR title/body and the exact command or blocker.
-7. Call skynet_pr with action "complete" and include branch, commits, files, verification, and PR URL/body. Use "fail" only with concrete blocker evidence.
+3. Read the QA evidence and inspect the target repository git status, branches, commits, worktrees, stashes, and relevant queue context.
+4. Do not fail as missing work before checking current worktrees, git log --all for expected files, branch containment for referenced commits, git stash list, tracked stash diffs, and untracked stash parents such as refs/stash^3. Use git ls-tree -r refs/stash^3 and git show refs/stash^3:<path> when untracked artifacts may hold the completed work. If scoped artifacts are found in a stash, recover only those files into a clean PR branch and continue.
+5. Build a coherent PR branch from the completed work. Prefer cherry-picking finished commits when they exist; otherwise stage and commit only files belonging to the passed QA scope. Do not include unrelated dirty files or revert user work.
+6. Run focused verification for the PR contents.
+7. Create a GitHub PR if existing auth/remotes allow it. If PR creation is blocked, leave a branch/commit plus PR title/body and the exact command or blocker.
+8. PR body rules:
+   - Never backslash-escape Markdown backtick characters in PR titles or bodies. Preserve inline code and fenced code blocks as normal GitHub Markdown.
+   - Prefer writing the PR body to a temporary Markdown file and using gh pr create --body-file so shell quoting does not force Markdown escaping or command substitution.
+   - For important architecture changes, including agent orchestration, data model, storage, auth, routing, workflow/CI, or cross-service/module flow, include an Architecture section with Before and After Mermaid diagrams.
+   - Validate diagram grammar before publishing: choose a valid directive such as flowchart LR, graph TD, sequenceDiagram, stateDiagram-v2, or gantt; use simple alphanumeric/underscore node IDs; quote labels with punctuation; close brackets/arrows; add dateFormat for gantt; and keep sequence participants/messages syntactically valid. If unsure, use a simple flowchart LR.
+   - For frontend feature PRs, render the affected route/component and capture visual evidence with a browser or Playwright snapshot/screenshot, or an equivalent rendered artifact. Include the artifact path/link, viewport, and any render caveat in the PR body.
+9. Call skynet_pr with action "complete" and include branch, commits, files, verification, PR URL/body, architecture diagrams if required, and frontend snapshot evidence if applicable. Use "fail" only with concrete blocker evidence and the missing-work search checklist results.
 `
 	case "feedback-planner":
 		roleRules = `Feedback planning flow:
@@ -662,13 +736,19 @@ func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
 			Name:     "skynet backlog iterator",
 			AgentKey: agentKeyBacklogIterator,
 			EveryMS:  2 * 60 * 1000,
-			Message:  `Run one Skynet backlog iteration. Call mcp__goclaw-bridge__skynet_backlog with action "next". If no pending item exists, respond with "No pending backlog item." If an item is returned, validate readiness first. If it is a rollup, milestone, stale, ambiguous, missing acceptance criteria, or too broad for one iteration, call mcp__goclaw-bridge__skynet_backlog with action "refine" and include concrete child bullets in "text"; do not mark refinement as failure. If it is actionable, implement it, run focused verification, write or update the repo-root QA report, and mark it complete or failed with mcp__goclaw-bridge__skynet_backlog. Completing a backlog item queues QA automatically.`,
+			Message:  `Run one Skynet backlog iteration. Call mcp__goclaw-bridge__skynet_backlog with action "next". If no pending item exists, respond with "No pending backlog item." If an item is returned, inspect any "related_items"; if a few nearby bullets are tightly related and safe to finish in one coherent change, call mcp__goclaw-bridge__skynet_backlog with action "claim_related" and item_ids before editing. Otherwise handle only the primary item. Validate readiness first. If the item is a rollup, milestone, stale, ambiguous, missing acceptance criteria, or too broad for one iteration, call mcp__goclaw-bridge__skynet_backlog with action "refine" and include concrete child bullets in "text"; prefix pure experiment-validation children with "Experiment leaf:" so they route to skynet_experiments; do not mark refinement as failure. If actionable, implement, run focused verification, write or update the repo-root QA report, and mark complete with item_id or item_ids. Completing backlog work queues QA automatically.`,
 		},
 		{
 			Name:     "skynet experiment iterator",
 			AgentKey: agentKeyExperimentIterator,
 			EveryMS:  60 * 60 * 1000,
-			Message:  `Run one Skynet experiment iteration. Call mcp__goclaw-bridge__skynet_experiments with action "next". If an item is returned, build or validate the experiment, then call mcp__goclaw-bridge__skynet_experiments with action "request_review". If no pending item exists, respond with "No pending experiment item."`,
+			Message:  `Run one Skynet experiment iteration. Call mcp__goclaw-bridge__skynet_experiments with action "next". This syncs repo experiments from apps/web/experiments when the queue is empty. If an item is returned, read its README/Mock/registry context, build or validate the experiment, then call mcp__goclaw-bridge__skynet_experiments with action "request_review". If no pending item exists, respond with "No pending experiment item."`,
+		},
+		{
+			Name:     "skynet experiment review reminder",
+			AgentKey: agentKeyExperimentIterator,
+			EveryMS:  5 * 60 * 1000,
+			Message:  `Run one Skynet experiment review reminder. Call mcp__goclaw-bridge__skynet_experiments with action "review_reminders" and limit 10. Do not validate, revise, approve, or implement any experiment in this reminder tick. If no review item exists, respond with "No experiment reviews awaiting action."`,
 		},
 		{
 			Name:     "skynet qa iterator",
@@ -680,7 +760,7 @@ func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
 			Name:     "skynet pr composer",
 			AgentKey: agentKeyPRComposer,
 			EveryMS:  10 * 60 * 1000,
-			Message:  `Run one Skynet PR composition iteration. Call mcp__goclaw-bridge__skynet_pr with action "next". If an item is returned, inspect the target repository, cherry-pick or stage only coherent post-QA changes into a PR branch, verify it, then call mcp__goclaw-bridge__skynet_pr with action "complete" including branch, commits, files, verification, and PR URL or PR-ready body. If no pending PR item exists, respond with "No pending PR item."`,
+			Message:  `Run one Skynet PR composition iteration. Call mcp__goclaw-bridge__skynet_pr with action "next". If an item is returned, inspect the target repository, including worktrees, branches, referenced commits, git stash list, tracked stash diffs, and untracked stash parents such as refs/stash^3. Do not fail as missing work until those locations have been checked; recover scoped artifacts from stash into a clean PR branch when found. Cherry-pick or stage only coherent post-QA changes into a PR branch, verify it, then create or prepare the PR. Never backslash-escape Markdown backtick characters in the PR title or body; prefer gh pr create --body-file from a temporary Markdown file. For important architecture PRs, include Before and After Mermaid diagrams and validate the diagram grammar before publishing. For frontend feature PRs, render the affected route/component and include snapshot/screenshot or equivalent visual evidence with viewport details. Then call mcp__goclaw-bridge__skynet_pr with action "complete" including branch, commits, files, verification, PR URL or PR-ready body, architecture diagrams when required, and frontend visual evidence when applicable. If no pending PR item exists, respond with "No pending PR item."`,
 		},
 	}
 
@@ -742,7 +822,7 @@ func (f *SkynetWorkflowsFeature) ensureSkynetBotAccess(ctx context.Context) erro
 			TenantID:            storepkg.MasterTenantID,
 			AgentKey:            agentKeySkynet,
 			DisplayName:         "Skynet",
-			Frontmatter:         "Skynet orchestration bot for CI failures, backlog, experiments, QA, PR composition, and feedback planning.",
+			Frontmatter:         "Skynet orchestration bot for CI failures, PR conflicts, backlog, experiments, QA, PR composition, and feedback planning.",
 			OwnerID:             "system",
 			Provider:            provider.Name,
 			Model:               modelCodex54,
@@ -810,14 +890,16 @@ func (f *SkynetWorkflowsFeature) grantSkynetWorkflowAccess(ctx context.Context, 
 You can manage these Skynet workflow tools:
 - skynet_workflows: configure/status for the target Telegram channel and repository.
 - skynet_ci_failure: dispatch CI/CD failure repair work to %s.
+- skynet_pr_conflict: dispatch PR merge-conflict resolution work to %s.
+- skynet_main_sync: fast-forward the clean local main deployment worktree and restart the web app.
 - skynet_backlog: add/list/claim/refine/complete implementation backlog items; complete queues QA.
 - skynet_experiments: add/list/claim/request review/transition accepted experiments.
 - skynet_qa: add/list/claim/pass/fail QA items; pass queues PR composition.
 - skynet_pr: add/list/claim/complete/fail post-QA PR composition items.
 - skynet_feedback_plan: turn user feedback into backlog items through %s.
 
-When users post CI failures, feedback, backlog bullets, experiment bullets, or QA bullets, call the matching tool instead of only replying in prose.
-`, agentKeyCIFixer, agentKeyFeedbackPlanner)
+When users post CI failures, PR conflicts, main deployment refresh requests, feedback, backlog bullets, experiment bullets, or QA bullets, call the matching tool instead of only replying in prose.
+`, agentKeyCIFixer, agentKeyPRConflictResolver, agentKeyFeedbackPlanner)
 	return f.agentStore.SetAgentContextFile(ctx, agentData.ID, "SKYNET_WORKFLOWS.md", content)
 }
 
