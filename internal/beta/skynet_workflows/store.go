@@ -431,6 +431,49 @@ func (s *featureStore) listItems(tenantID, kind, status string, limit int) ([]wo
 	return items, rows.Err()
 }
 
+func (s *featureStore) listRepoReferenceItems(tenantID string) ([]workflowItem, error) {
+	rows, err := s.db.Query(`
+		SELECT id, tenant_id, kind, status, body, source, channel, chat_id, local_key,
+		       claimed_by, agent_key, result, metadata, created_at, updated_at
+		FROM beta_skynet_workflow_items
+		WHERE tenant_id=$1
+		  AND status IN ('pending', 'in_progress', 'review', 'needs_refinement', 'failed')
+		ORDER BY
+		  CASE kind
+		    WHEN 'backlog' THEN 1
+		    WHEN 'experiment' THEN 2
+		    WHEN 'qa' THEN 3
+		    WHEN 'pr' THEN 4
+		    ELSE 9
+		  END,
+		  CASE status
+		    WHEN 'pending' THEN 1
+		    WHEN 'in_progress' THEN 2
+		    WHEN 'review' THEN 3
+		    WHEN 'needs_refinement' THEN 4
+		    WHEN 'failed' THEN 5
+		    ELSE 9
+		  END,
+		  created_at ASC`, strings.TrimSpace(tenantID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]workflowItem, 0)
+	for rows.Next() {
+		item, err := scanWorkflowItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		if !shouldMirrorRepoReference(*item) {
+			continue
+		}
+		items = append(items, *item)
+	}
+	return items, rows.Err()
+}
+
 func (s *featureStore) updateStatus(tenantID, id, status, result string, metadata map[string]string) (*workflowItem, error) {
 	existing, err := s.getItem(tenantID, id)
 	if err != nil {

@@ -70,6 +70,9 @@ func (f *SkynetWorkflowsFeature) syncRepoExperiments(ctx context.Context, tenant
 		known[task.Source] = true
 		result.Imported++
 	}
+	if result.Imported > 0 {
+		f.refreshRepoWorkflowReference(ctx, tenantID)
+	}
 	return result, nil
 }
 

@@ -525,6 +525,7 @@ Operational rules:
 - Do not treat planning/decomposition as implementation failure. If a backlog item is a milestone, rollup, stale note, or lacks acceptance criteria, use the queue's refinement transition and create implementation-sized child bullets.
 - Keep changes scoped to the target repository and verify with the local test/build commands you can run.
 - Update the queue item status with the matching Skynet tool before ending the run.
+- GoClaw mirrors active workflow-only backlog/experiment/QA/PR items into backlog/99-skynet-workflow-queue.md in the target repo for visibility. Treat it as generated reference; use Skynet tools for state changes.
 `, targetRepo, workspace, featureName, workflowToolNameHint())
 
 	role := spec.Role
