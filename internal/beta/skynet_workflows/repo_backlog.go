@@ -74,6 +74,9 @@ func (f *SkynetWorkflowsFeature) syncRepoBacklog(ctx context.Context, tenantID s
 		known[task.Source] = true
 		result.Imported++
 	}
+	if result.Imported > 0 {
+		f.refreshRepoWorkflowReference(ctx, tenantID)
+	}
 	return result, nil
 }
 
@@ -95,7 +98,7 @@ func scanRepoBacklog(repo string) ([]repoBacklogTask, error) {
 			continue
 		}
 		switch strings.ToLower(entry.Name()) {
-		case "readme.md", "progress.md":
+		case "readme.md", "progress.md", strings.ToLower(filepath.Base(repoWorkflowReferenceRelPath)):
 			continue
 		}
 		path := filepath.Join(backlogDir, entry.Name())

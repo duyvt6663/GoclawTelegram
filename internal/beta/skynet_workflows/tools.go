@@ -303,6 +303,7 @@ func (t *boardTool) add(ctx context.Context, tenantID string, args map[string]an
 	if err != nil {
 		return tools.ErrorResult(err.Error())
 	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
 	return jsonResult(map[string]any{"status": "added", "count": len(items), "items": items})
 }
 
@@ -354,6 +355,7 @@ func (t *boardTool) next(ctx context.Context, tenantID string, args map[string]a
 	if err := t.feature.publishWorkflowUpdate(ctx, item, "CLAIMED", ""); err != nil {
 		slog.Warn("skynet workflow update notification failed", "kind", t.kind, "item_id", item.ID, "error", err)
 	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
 	payload := map[string]any{
 		"status":       "claimed",
 		"item":         item,
@@ -398,6 +400,7 @@ func (t *boardTool) claimRelatedBacklog(ctx context.Context, tenantID string, ar
 			slog.Warn("skynet related backlog claim notification failed", "item_id", item.ID, "error", err)
 		}
 	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
 	return jsonResult(map[string]any{"status": "claimed_related", "items": items})
 }
 
@@ -419,6 +422,7 @@ func (t *boardTool) update(ctx context.Context, tenantID string, args map[string
 	if err := t.feature.publishWorkflowUpdate(ctx, item, strings.ToUpper(status), result); err != nil {
 		slog.Warn("skynet workflow terminal notification failed", "kind", t.kind, "item_id", item.ID, "status", status, "error", err)
 	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
 	return jsonResult(map[string]any{"status": status, "item": item})
 }
 
@@ -504,6 +508,7 @@ QA requirements:
 			slog.Warn("skynet backlog completion-to-QA notification failed", "item_id", updated.ID, "error", err)
 		}
 	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
 	return jsonResult(map[string]any{
 		"status":   "queued_for_qa",
 		"items":    updatedItems,
@@ -571,6 +576,7 @@ PR composition requirements:
 	if err := t.feature.publishWorkflowUpdate(ctx, updated, "PASSED -> PR", updateResult); err != nil {
 		slog.Warn("skynet QA pass-to-PR notification failed", "item_id", updated.ID, "error", err)
 	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
 	return jsonResult(map[string]any{
 		"status":   "queued_for_pr",
 		"qa_item":  updated,
@@ -657,6 +663,7 @@ func (t *boardTool) refineBacklog(ctx context.Context, tenantID string, args map
 	if err := t.feature.publishWorkflowUpdate(ctx, updated, "NEEDS REFINEMENT", result); err != nil {
 		slog.Warn("skynet backlog refinement notification failed", "item_id", updated.ID, "error", err)
 	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
 	return jsonResult(map[string]any{
 		"status":           statusRefinement,
 		"item":             updated,
@@ -695,6 +702,7 @@ func (t *boardTool) failQAToBacklog(ctx context.Context, tenantID string, args m
 	if err := t.feature.publishWorkflowUpdate(ctx, updated, "FAILED -> BACKLOG", result); err != nil {
 		slog.Warn("skynet QA transition notification failed", "item_id", updated.ID, "error", err)
 	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
 	return jsonResult(map[string]any{
 		"status":        "moved_to_backlog",
 		"qa_item":       updated,
@@ -722,6 +730,7 @@ func (t *boardTool) requestExperimentReview(ctx context.Context, tenantID string
 		return tools.ErrorResult(err.Error())
 	}
 	if err := t.feature.publishExperimentReview(ctx, updated, result); err != nil {
+		t.feature.refreshRepoWorkflowReference(ctx, tenantID)
 		return jsonResult(map[string]any{
 			"status":  "review_pending_delivery",
 			"item":    updated,
@@ -730,6 +739,7 @@ func (t *boardTool) requestExperimentReview(ctx context.Context, tenantID string
 		})
 	}
 	_ = item
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
 	return jsonResult(map[string]any{"status": "review_requested", "item": updated})
 }
 
@@ -785,6 +795,7 @@ Call skynet_backlog with action "add" and put the backlog plan in bullet form. D
 	if err != nil {
 		return tools.ErrorResult(err.Error())
 	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
 	return jsonResult(map[string]any{"status": "transition_dispatched", "item": updated, "agent": agentKeyExperimentBacklog})
 }
 
@@ -814,6 +825,7 @@ func (t *boardTool) reviseExperiment(ctx context.Context, tenantID string, args 
 	if err != nil {
 		return tools.ErrorResult(err.Error())
 	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
 	return jsonResult(map[string]any{"status": "revision_queued", "old_item": updated, "new_items": newItems})
 }
 
