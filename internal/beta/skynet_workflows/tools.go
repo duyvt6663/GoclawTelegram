@@ -39,6 +39,8 @@ func (t *workflowControlTool) Parameters() map[string]any {
 			"local_key":   map[string]any{"type": "string", "description": "Composite topic/thread key, e.g. -100123:topic:42. Defaults to current local key."},
 			"peer_kind":   map[string]any{"type": "string", "description": "direct or group. Defaults to current peer kind."},
 			"target_repo": map[string]any{"type": "string", "description": "Absolute path of the repository the Skynet workers should edit."},
+			"deploy_repo": map[string]any{"type": "string", "description": "Absolute path of the clean main deployment worktree."},
+			"web_port":    map[string]any{"type": "string", "description": "Local web port for main deployment refreshes."},
 		},
 		"required": []string{"action"},
 	}
@@ -64,6 +66,16 @@ func (t *workflowControlTool) Execute(ctx context.Context, args map[string]any) 
 				return tools.ErrorResult(err.Error())
 			}
 		}
+		if deployRepo := stringArg(args, "deploy_repo"); deployRepo != "" {
+			if err := t.feature.setDeployRepo(ctx, deployRepo); err != nil {
+				return tools.ErrorResult(err.Error())
+			}
+		}
+		if webPort := stringArg(args, "web_port"); webPort != "" {
+			if err := t.feature.setWebPort(ctx, webPort); err != nil {
+				return tools.ErrorResult(err.Error())
+			}
+		}
 		if _, err := t.feature.ensureAgents(ctx); err != nil {
 			return tools.ErrorResult(err.Error())
 		}
@@ -74,6 +86,8 @@ func (t *workflowControlTool) Execute(ctx context.Context, args map[string]any) 
 			"status":      "configured",
 			"origin":      t.feature.configuredOrigin(ctx),
 			"target_repo": t.feature.resolveTargetRepo(ctx),
+			"deploy_repo": t.feature.configuredDeployRepo(ctx),
+			"web_port":    t.feature.configuredWebPort(ctx),
 		})
 	case "seed_cron":
 		if err := t.feature.ensureCronJobs(ctx); err != nil {
@@ -100,6 +114,8 @@ func (t *workflowControlTool) status(ctx context.Context) *tools.Result {
 	payload := map[string]any{
 		"feature":     featureName,
 		"target_repo": t.feature.resolveTargetRepo(ctx),
+		"deploy_repo": t.feature.configuredDeployRepo(ctx),
+		"web_port":    t.feature.configuredWebPort(ctx),
 		"origin":      t.feature.configuredOrigin(ctx),
 		"agents":      agents,
 		"queues":      counts,

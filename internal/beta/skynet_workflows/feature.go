@@ -25,6 +25,8 @@ const (
 	configKeyLocalKey   = "beta.skynet_workflows.local_key"
 	configKeyPeerKind   = "beta.skynet_workflows.peer_kind"
 	configKeyTargetRepo = "beta.skynet_workflows.target_repo"
+	configKeyDeployRepo = "beta.skynet_workflows.main_deploy_repo"
+	configKeyWebPort    = "beta.skynet_workflows.web_port"
 
 	agentKeySkynet             = "skynet"
 	agentKeyBuilderBot         = "builder-bot"
@@ -53,6 +55,7 @@ var skynetWorkflowTools = []string{
 	"skynet_pr",
 	"skynet_ci_failure",
 	"skynet_pr_conflict",
+	"skynet_main_sync",
 	"skynet_feedback_plan",
 }
 
@@ -131,6 +134,7 @@ func (f *SkynetWorkflowsFeature) Init(deps beta.Deps) error {
 		deps.ToolRegistry.Register(&boardTool{feature: f, name: "skynet_pr", kind: kindPR})
 		deps.ToolRegistry.Register(&ciFailureTool{feature: f})
 		deps.ToolRegistry.Register(&prConflictTool{feature: f})
+		deps.ToolRegistry.Register(&mainSyncTool{feature: f})
 		deps.ToolRegistry.Register(&feedbackPlanTool{feature: f})
 	}
 	if deps.Server != nil {
@@ -182,6 +186,35 @@ func (f *SkynetWorkflowsFeature) setTargetRepo(ctx context.Context, targetRepo s
 	f.targetRepo = targetRepo
 	if f.sysConfigs != nil {
 		if err := f.sysConfigs.Set(ctx, configKeyTargetRepo, targetRepo); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *SkynetWorkflowsFeature) setDeployRepo(ctx context.Context, deployRepo string) error {
+	deployRepo = strings.TrimSpace(deployRepo)
+	if deployRepo == "" {
+		return nil
+	}
+	if f.sysConfigs != nil {
+		if err := f.sysConfigs.Set(ctx, configKeyDeployRepo, deployRepo); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (f *SkynetWorkflowsFeature) setWebPort(ctx context.Context, webPort string) error {
+	webPort = strings.TrimSpace(webPort)
+	if webPort == "" {
+		return nil
+	}
+	if !safePort(webPort) {
+		return fmt.Errorf("unsafe web port: %q", webPort)
+	}
+	if f.sysConfigs != nil {
+		if err := f.sysConfigs.Set(ctx, configKeyWebPort, webPort); err != nil {
 			return err
 		}
 	}
@@ -460,8 +493,9 @@ func workflowToolNameHint() string {
 - %s for skynet_pr
 - %s for skynet_ci_failure
 - %s for skynet_pr_conflict
+- %s for skynet_main_sync
 - %s for skynet_feedback_plan
-`, mcpToolName("skynet_backlog"), mcpToolName("skynet_experiments"), mcpToolName("skynet_qa"), mcpToolName("skynet_pr"), mcpToolName("skynet_ci_failure"), mcpToolName("skynet_pr_conflict"), mcpToolName("skynet_feedback_plan"))
+`, mcpToolName("skynet_backlog"), mcpToolName("skynet_experiments"), mcpToolName("skynet_qa"), mcpToolName("skynet_pr"), mcpToolName("skynet_ci_failure"), mcpToolName("skynet_pr_conflict"), mcpToolName("skynet_main_sync"), mcpToolName("skynet_feedback_plan"))
 }
 
 func (f *SkynetWorkflowsFeature) contextFilesForSpec(spec workflowAgentSpec, workspace string) map[string]string {
@@ -477,6 +511,7 @@ Tools:
 - Use skynet_pr for post-QA PR composition and completion tracking.
 - Use skynet_ci_failure only for CI/CD failure intake.
 - Use skynet_pr_conflict only for GitHub PR merge-conflict intake.
+- Use skynet_main_sync only for local main deployment refresh after main branch updates.
 - Use skynet_feedback_plan only for user feedback planning intake.
 
 %s
@@ -847,13 +882,14 @@ You can manage these Skynet workflow tools:
 - skynet_workflows: configure/status for the target Telegram channel and repository.
 - skynet_ci_failure: dispatch CI/CD failure repair work to %s.
 - skynet_pr_conflict: dispatch PR merge-conflict resolution work to %s.
+- skynet_main_sync: fast-forward the clean local main deployment worktree and restart the web app.
 - skynet_backlog: add/list/claim/refine/complete implementation backlog items; complete queues QA.
 - skynet_experiments: add/list/claim/request review/transition accepted experiments.
 - skynet_qa: add/list/claim/pass/fail QA items; pass queues PR composition.
 - skynet_pr: add/list/claim/complete/fail post-QA PR composition items.
 - skynet_feedback_plan: turn user feedback into backlog items through %s.
 
-When users post CI failures, PR conflicts, feedback, backlog bullets, experiment bullets, or QA bullets, call the matching tool instead of only replying in prose.
+When users post CI failures, PR conflicts, main deployment refresh requests, feedback, backlog bullets, experiment bullets, or QA bullets, call the matching tool instead of only replying in prose.
 `, agentKeyCIFixer, agentKeyPRConflictResolver, agentKeyFeedbackPlanner)
 	return f.agentStore.SetAgentContextFile(ctx, agentData.ID, "SKYNET_WORKFLOWS.md", content)
 }

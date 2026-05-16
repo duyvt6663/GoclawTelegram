@@ -514,6 +514,50 @@ func TestPRConflictDedupeKeyNormalizesPRNumber(t *testing.T) {
 	}
 }
 
+func TestMainSyncDefaultsAndFingerprint(t *testing.T) {
+	targetRepo := "/Users/duyvt6663/github/ResearchCrafters"
+	if got, want := siblingMainDeployRepo(targetRepo), "/Users/duyvt6663/github/ResearchCrafters-main"; got != want {
+		t.Fatalf("siblingMainDeployRepo() = %q, want %q", got, want)
+	}
+
+	args := map[string]any{
+		"repository": "duyvt6663/ResearchCrafters",
+		"commit":     "abcdef123456",
+	}
+	if got, want := mainSyncFingerprint(args, "main"), "duyvt6663/ResearchCrafters|main|abcdef123456"; got != want {
+		t.Fatalf("mainSyncFingerprint() = %q, want %q", got, want)
+	}
+	if got, want := mainSyncConfigKey(args, "main"), "beta.skynet_workflows.main_sync.duyvt6663_researchcrafters.main"; got != want {
+		t.Fatalf("mainSyncConfigKey() = %q, want %q", got, want)
+	}
+}
+
+func TestMainSyncInputValidation(t *testing.T) {
+	for _, branch := range []string{"main", "release/2026.05", "feature_a-b"} {
+		if !safeMainSyncBranch(branch) {
+			t.Fatalf("branch %q should be accepted", branch)
+		}
+	}
+	for _, branch := range []string{"../main", "main..next", "main next", "-bad"} {
+		if safeMainSyncBranch(branch) {
+			t.Fatalf("branch %q should be rejected", branch)
+		}
+	}
+	for _, port := range []string{"3000", "80", "65535"} {
+		if !safePort(port) {
+			t.Fatalf("port %q should be accepted", port)
+		}
+	}
+	for _, port := range []string{"", "3000;rm", "123456"} {
+		if safePort(port) {
+			t.Fatalf("port %q should be rejected", port)
+		}
+	}
+	if got := shellQuote("a'b"); got != `'a'"'"'b'` {
+		t.Fatalf("shellQuote() = %q", got)
+	}
+}
+
 func TestEmptyQueueNextPublishesIdleLog(t *testing.T) {
 	store := newTestFeatureStore(t)
 	msgBus := bus.New()
