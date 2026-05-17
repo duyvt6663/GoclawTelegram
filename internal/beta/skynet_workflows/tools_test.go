@@ -135,6 +135,49 @@ func TestBacklogRefineRoutesExperimentLeafToExperimentQueue(t *testing.T) {
 	}
 }
 
+func TestPrioritizeBacklogUpdatesMetadataAndClaimOrder(t *testing.T) {
+	store := newTestFeatureStore(t)
+	tenantID := storepkg.MasterTenantID.String()
+	items, err := store.addItems(tenantID, kindBacklog, []string{
+		"Routine cleanup",
+		"Checkout enrollment blocker",
+	}, workflowOrigin{}, "test", nil)
+	if err != nil {
+		t.Fatalf("addItems: %v", err)
+	}
+
+	tool := &boardTool{
+		feature: &SkynetWorkflowsFeature{store: store},
+		name:    "skynet_backlog",
+		kind:    kindBacklog,
+	}
+	result := tool.Execute(context.Background(), map[string]any{
+		"action":          "prioritize",
+		"item_id":         items[1].ID,
+		"priority":        "p0",
+		"feature":         "checkout",
+		"priority_reason": "Blocks package enrollment.",
+	})
+	if result.IsError {
+		t.Fatalf("prioritize returned error: %s", result.ForLLM)
+	}
+	updated, err := store.getItem(tenantID, items[1].ID)
+	if err != nil {
+		t.Fatalf("get prioritized item: %v", err)
+	}
+	if updated.Metadata["priority"] != "100" || updated.Metadata["priority_feature"] != "checkout" {
+		t.Fatalf("priority metadata = %#v", updated.Metadata)
+	}
+
+	claimed, err := store.claimNext(tenantID, kindBacklog, "worker", "skynet-backlog-iterator")
+	if err != nil {
+		t.Fatalf("claimNext: %v", err)
+	}
+	if claimed.ID != items[1].ID {
+		t.Fatalf("claimed %s, want prioritized item %s", claimed.ID, items[1].ID)
+	}
+}
+
 func TestQAPassQueuesPRCompositionItem(t *testing.T) {
 	store := newTestFeatureStore(t)
 	tenantID := storepkg.MasterTenantID.String()

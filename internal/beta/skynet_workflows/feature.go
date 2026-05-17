@@ -558,6 +558,7 @@ Tools:
 
 Operational rules:
 - Claim one queue item at a time.
+- Backlog queue claims are priority-aware, not FIFO. Higher priority metadata is claimed first; old low-priority backlog items receive aging boosts so they cannot starve.
 - Validate unclear requests before broad edits; implement only when the item is actionable.
 - Do not treat planning/decomposition as implementation failure. If a backlog item is a milestone, rollup, stale note, or lacks acceptance criteria, use the queue's refinement transition and create implementation-sized child bullets.
 - Keep changes scoped to the target repository and verify with the local test/build commands you can run.
@@ -591,10 +592,11 @@ Operational rules:
 		roleRules = `Backlog flow:
 1. Call skynet_backlog with action "next".
 2. If no item is returned, stop.
-3. Review any "related_items" returned by the tool. If nearby pending bullets are tightly related and can be completed safely in one focused change, call skynet_backlog with action "claim_related" and "item_ids" before editing. Otherwise ignore them.
-4. Validate readiness by reading linked docs, experiments/archive notes, prior QA, and current code paths.
-5. If the item is a broad rollup, milestone, stale, missing acceptance criteria, or needs an experiment/spike first, call skynet_backlog with action "refine". Put concrete implementation-sized child bullets in "text" and explain the dependency/order in "result"; prefix pure experiment-validation children with "Experiment leaf:" so they route to skynet_experiments. Do not use "fail" for refinement.
-6. If the item or claimed batch is actionable, implement, run focused verification, write or update the repo-root QA report, then call skynet_backlog with action "complete" using "item_ids" for a batch or "item_id" for one item. The complete action queues QA automatically; use "fail" only for an attempted implementation that cannot be completed safely.
+3. Review priority metadata (priority, priority_feature, priority_reason) and any "related_items" returned by the tool. If you learn that nearby pending backlog items should move up or down because of the active feature/module, call skynet_backlog with action "prioritize", item_id/item_ids, priority, feature, and priority_reason before claiming related work.
+4. If nearby pending bullets are tightly related and can be completed safely in one focused change, call skynet_backlog with action "claim_related" and "item_ids" before editing. Otherwise ignore them.
+5. Validate readiness by reading linked docs, experiments/archive notes, prior QA, and current code paths.
+6. If the item is a broad rollup, milestone, stale, missing acceptance criteria, or needs an experiment/spike first, call skynet_backlog with action "refine". Put concrete implementation-sized child bullets in "text" and explain the dependency/order in "result"; prefix pure experiment-validation children with "Experiment leaf:" so they route to skynet_experiments. Include priority/feature when children should inherit or override the parent queue priority. Do not use "fail" for refinement.
+7. If the item or claimed batch is actionable, implement, run focused verification, write or update the repo-root QA report, then call skynet_backlog with action "complete" using "item_ids" for a batch or "item_id" for one item. The complete action queues QA automatically; use "fail" only for an attempted implementation that cannot be completed safely.
 `
 	case "experiment-iterator":
 		roleRules = `Experiment flow:
@@ -788,7 +790,7 @@ func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
 			Name:     "skynet backlog iterator",
 			AgentKey: agentKeyBacklogIterator,
 			EveryMS:  2 * 60 * 1000,
-			Message:  `Run one Skynet backlog iteration. Call mcp__goclaw-bridge__skynet_backlog with action "next". If no pending item exists, respond with "No pending backlog item." If an item is returned, inspect any "related_items"; if a few nearby bullets are tightly related and safe to finish in one coherent change, call mcp__goclaw-bridge__skynet_backlog with action "claim_related" and item_ids before editing. Otherwise handle only the primary item. Validate readiness first. If the item is a rollup, milestone, stale, ambiguous, missing acceptance criteria, or too broad for one iteration, call mcp__goclaw-bridge__skynet_backlog with action "refine" and include concrete child bullets in "text"; prefix pure experiment-validation children with "Experiment leaf:" so they route to skynet_experiments; do not mark refinement as failure. If actionable, implement, run focused verification, write or update the repo-root QA report, and mark complete with item_id or item_ids. Completing backlog work queues QA automatically.`,
+			Message:  `Run one Skynet backlog iteration. Call mcp__goclaw-bridge__skynet_backlog with action "next"; backlog claims are priority-aware and old low-priority items receive aging boosts. If no pending item exists, respond with "No pending backlog item." If an item is returned, inspect priority metadata and any "related_items"; if a nearby pending item should move up or down for the active feature/module, call mcp__goclaw-bridge__skynet_backlog with action "prioritize" and item_id/item_ids, priority, feature, and priority_reason. If a few nearby bullets are tightly related and safe to finish in one coherent change, call mcp__goclaw-bridge__skynet_backlog with action "claim_related" and item_ids before editing. Otherwise handle only the primary item. Validate readiness first. If the item is a rollup, milestone, stale, ambiguous, missing acceptance criteria, or too broad for one iteration, call mcp__goclaw-bridge__skynet_backlog with action "refine" and include concrete child bullets in "text"; prefix pure experiment-validation children with "Experiment leaf:" so they route to skynet_experiments; include priority/feature when child backlog items should inherit or override the parent priority; do not mark refinement as failure. If actionable, implement, run focused verification, write or update the repo-root QA report, and mark complete with item_id or item_ids. Completing backlog work queues QA automatically.`,
 		},
 		{
 			Name:     "skynet experiment iterator",
@@ -962,7 +964,7 @@ You can manage these Skynet workflow tools:
 - skynet_ci_failure: dispatch CI/CD failure repair work to %s.
 - skynet_pr_conflict: dispatch PR merge-conflict resolution work to %s.
 - skynet_main_sync: fast-forward the clean local main deployment worktree and restart the web app.
-- skynet_backlog: add/list/claim/refine/complete implementation backlog items; complete queues QA.
+- skynet_backlog: add/list/claim/prioritize/refine/complete implementation backlog items; higher priority is claimed first and old low-priority items receive aging boosts; complete queues QA.
 - skynet_experiments: add/list/claim/request review/transition accepted experiments.
 - skynet_change_requests: submit/list/review RED change requests; accepted CRs route to experiments or backlog only after human review.
 - skynet_qa: add/list/claim/pass/fail QA items; pass queues PR composition.

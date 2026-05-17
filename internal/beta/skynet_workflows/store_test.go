@@ -3,6 +3,7 @@ package skynetworkflows
 import (
 	"database/sql"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -103,5 +104,75 @@ func TestRelatedPendingAndClaimPendingByIDs(t *testing.T) {
 		if item.Status != statusInProgress {
 			t.Fatalf("claimed item status = %q", item.Status)
 		}
+	}
+}
+
+func TestBacklogPriorityClaimOrder(t *testing.T) {
+	store := newTestFeatureStore(t)
+	tenantID := "tenant-priority"
+	low, err := store.addItems(tenantID, kindBacklog, []string{"Low priority cleanup"}, workflowOrigin{}, "test-low", map[string]string{
+		"priority": "10",
+	})
+	if err != nil {
+		t.Fatalf("add low priority item: %v", err)
+	}
+	high, err := store.addItems(tenantID, kindBacklog, []string{"High priority feature"}, workflowOrigin{}, "test-high", map[string]string{
+		"priority":         "80",
+		"priority_feature": "checkout",
+	})
+	if err != nil {
+		t.Fatalf("add high priority item: %v", err)
+	}
+
+	listed, err := store.listItems(tenantID, kindBacklog, statusPending, 10)
+	if err != nil {
+		t.Fatalf("listItems: %v", err)
+	}
+	if len(listed) < 2 || listed[0].ID != high[0].ID || listed[1].ID != low[0].ID {
+		t.Fatalf("priority list order = %#v, want high before low", listed)
+	}
+
+	claimed, err := store.claimNext(tenantID, kindBacklog, "worker", "skynet-backlog-iterator")
+	if err != nil {
+		t.Fatalf("claimNext: %v", err)
+	}
+	if claimed.ID != high[0].ID {
+		t.Fatalf("claimed %s, want high priority %s", claimed.ID, high[0].ID)
+	}
+}
+
+func TestBacklogPriorityAgingBoostsBottomItems(t *testing.T) {
+	store := newTestFeatureStore(t)
+	tenantID := "tenant-aging"
+	oldLow, err := store.addItems(tenantID, kindBacklog, []string{"Old low priority task"}, workflowOrigin{}, "test-old-low", map[string]string{
+		"priority": "0",
+	})
+	if err != nil {
+		t.Fatalf("add old low item: %v", err)
+	}
+	high, err := store.addItems(tenantID, kindBacklog, []string{"New urgent task"}, workflowOrigin{}, "test-high", map[string]string{
+		"priority": "100",
+	})
+	if err != nil {
+		t.Fatalf("add high item: %v", err)
+	}
+	oldCreatedAt := time.Now().UTC().Add(-48 * time.Hour)
+	if _, err := store.db.Exec(`UPDATE beta_skynet_workflow_items SET created_at=$3, updated_at=$3 WHERE tenant_id=$1 AND id=$2`, tenantID, oldLow[0].ID, oldCreatedAt); err != nil {
+		t.Fatalf("age old item: %v", err)
+	}
+
+	claimed, err := store.claimNext(tenantID, kindBacklog, "worker", "skynet-backlog-iterator")
+	if err != nil {
+		t.Fatalf("claimNext: %v", err)
+	}
+	if claimed.ID != high[0].ID {
+		t.Fatalf("claimed %s, want urgent item %s", claimed.ID, high[0].ID)
+	}
+	boosted, err := store.getItem(tenantID, oldLow[0].ID)
+	if err != nil {
+		t.Fatalf("get boosted item: %v", err)
+	}
+	if boosted.Metadata["priority_boost"] != "5" || boosted.Metadata["priority_last_boost_reason"] != "bottom_queue_aging" {
+		t.Fatalf("old low item priority boost metadata = %#v", boosted.Metadata)
 	}
 }
