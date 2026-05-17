@@ -157,7 +157,7 @@ func (t *boardTool) Parameters() map[string]any {
 				"type": "string",
 				"enum": []string{
 					"add", "parse", "sync_repo", "list", "next", "complete", "refine", "split", "fail",
-					"claim_related", "pass", "fail_to_backlog", "request_review", "review_reminders", "approve_to_backlog", "approve_to_experiment", "revise", "drop", "submit",
+					"claim_related", "prioritize", "pass", "fail_to_backlog", "request_review", "review_reminders", "approve_to_backlog", "approve_to_experiment", "revise", "drop", "submit",
 				},
 			},
 			"text":            map[string]any{"type": "string", "description": "Raw text or bullet list to add. For refine/split, this is the child backlog bullet list to enqueue."},
@@ -173,6 +173,9 @@ func (t *boardTool) Parameters() map[string]any {
 			"suggested_route": map[string]any{"type": "string", "description": "Optional alias for route."},
 			"erp":             map[string]any{"type": "string", "description": "Optional ERP/package slug related to a change request."},
 			"deployment_url":  map[string]any{"type": "string", "description": "Optional deployment URL reviewed for a change request."},
+			"priority":        map[string]any{"description": "Optional backlog priority. Accepts 0-100, p0-p4, low, normal, high, urgent. Higher is claimed first."},
+			"feature":         map[string]any{"type": "string", "description": "Optional feature/module label for backlog prioritization."},
+			"priority_reason": map[string]any{"type": "string", "description": "Optional reason for setting backlog priority."},
 			"agent_key":       map[string]any{"type": "string", "description": "Optional claiming agent key."},
 			"channel":         map[string]any{"type": "string", "description": "Optional channel override."},
 			"chat_id":         map[string]any{"type": "string", "description": "Optional chat override."},
@@ -268,6 +271,11 @@ func (t *boardTool) Execute(ctx context.Context, args map[string]any) *tools.Res
 			return tools.ErrorResult("claim_related is only valid for skynet_backlog")
 		}
 		return t.claimRelatedBacklog(ctx, tenantID, args)
+	case "prioritize":
+		if t.kind != kindBacklog {
+			return tools.ErrorResult("prioritize is only valid for skynet_backlog")
+		}
+		return t.prioritizeBacklog(ctx, tenantID, args)
 	case "fail":
 		return t.update(ctx, tenantID, args, statusFailed, "failed")
 	case "drop":
@@ -330,9 +338,13 @@ func (t *boardTool) add(ctx context.Context, tenantID string, args map[string]an
 		return tools.ErrorResult("text is required")
 	}
 	origin := originFromToolContext(ctx, args)
-	items, err := t.feature.store.addItems(tenantID, t.kind, parseBulletItems(text), origin, stringArg(args, "source"), map[string]string{
+	metadata := map[string]string{
 		"created_by_agent": tools.ToolAgentKeyFromCtx(ctx),
-	})
+	}
+	if t.kind == kindBacklog {
+		applyBacklogPriorityArgs(metadata, args, tools.ToolAgentKeyFromCtx(ctx))
+	}
+	items, err := t.feature.store.addItems(tenantID, t.kind, parseBulletItems(text), origin, stringArg(args, "source"), metadata)
 	if err != nil {
 		return tools.ErrorResult(err.Error())
 	}
@@ -435,6 +447,50 @@ func (t *boardTool) claimRelatedBacklog(ctx context.Context, tenantID string, ar
 	}
 	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
 	return jsonResult(map[string]any{"status": "claimed_related", "items": items})
+}
+
+func (t *boardTool) prioritizeBacklog(ctx context.Context, tenantID string, args map[string]any) *tools.Result {
+	ids := itemIDsArg(args)
+	if len(ids) == 0 {
+		return tools.ErrorResult("item_id or item_ids is required")
+	}
+	priority, ok := backlogPriorityArg(args)
+	if !ok {
+		return tools.ErrorResult("priority is required")
+	}
+	agentKey := tools.ToolAgentKeyFromCtx(ctx)
+	metadata := map[string]string{
+		"priority":             fmt.Sprintf("%d", priority),
+		"priority_assigned_by": agentKey,
+		"priority_assigned_at": time.Now().UTC().Format(time.RFC3339),
+	}
+	if feature := stringArg(args, "feature", "priority_feature"); feature != "" {
+		metadata["priority_feature"] = feature
+	}
+	if reason := stringArg(args, "priority_reason", "reason", "result"); reason != "" {
+		metadata["priority_reason"] = reason
+	}
+
+	items := make([]workflowItem, 0, len(ids))
+	for _, id := range ids {
+		item, err := t.feature.store.getItem(tenantID, id)
+		if err != nil {
+			return tools.ErrorResult(err.Error())
+		}
+		if item.Kind != kindBacklog {
+			return tools.ErrorResult("prioritize only supports backlog items")
+		}
+		updated, err := t.feature.store.updateMetadata(tenantID, id, metadata)
+		if err != nil {
+			return tools.ErrorResult(err.Error())
+		}
+		items = append(items, *updated)
+		if err := t.feature.publishWorkflowUpdate(ctx, updated, "PRIORITIZED", metadata["priority_reason"]); err != nil {
+			slog.Warn("skynet backlog priority notification failed", "item_id", updated.ID, "error", err)
+		}
+	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
+	return jsonResult(map[string]any{"status": "prioritized", "priority": priority, "items": items})
 }
 
 func (t *boardTool) update(ctx context.Context, tenantID string, args map[string]any, status, defaultResult string) *tools.Result {
@@ -642,6 +698,8 @@ func (t *boardTool) refineBacklog(ctx context.Context, tenantID string, args map
 			"parent_item":      item.ID,
 			"transition":       "backlog_refinement",
 		}
+		inheritBacklogPriorityMetadata(childMetadata, item.Metadata)
+		applyBacklogPriorityArgs(childMetadata, args, tools.ToolAgentKeyFromCtx(ctx))
 		if sourcePath := item.Metadata["source_path"]; sourcePath != "" {
 			childMetadata["parent_source_path"] = sourcePath
 		}
@@ -1993,6 +2051,63 @@ func containsLowerWord(text, word string) bool {
 	return false
 }
 
+func applyBacklogPriorityArgs(metadata map[string]string, args map[string]any, agentKey string) {
+	if priority, ok := backlogPriorityArg(args); ok {
+		metadata["priority"] = fmt.Sprintf("%d", priority)
+		metadata["priority_assigned_by"] = agentKey
+		metadata["priority_assigned_at"] = time.Now().UTC().Format(time.RFC3339)
+	}
+	if feature := stringArg(args, "feature", "priority_feature"); feature != "" {
+		metadata["priority_feature"] = feature
+	}
+	if reason := stringArg(args, "priority_reason", "reason"); reason != "" {
+		metadata["priority_reason"] = reason
+	}
+}
+
+func inheritBacklogPriorityMetadata(dst, src map[string]string) {
+	for _, key := range []string{"priority", "priority_feature", "priority_reason"} {
+		if value := strings.TrimSpace(src[key]); value != "" {
+			dst[key] = value
+		}
+	}
+}
+
+func backlogPriorityArg(args map[string]any) (int, bool) {
+	raw, ok := args["priority"]
+	if !ok || raw == nil {
+		return 0, false
+	}
+	switch value := raw.(type) {
+	case int:
+		return clampBacklogPriority(value), true
+	case int64:
+		return clampBacklogPriority(int(value)), true
+	case float64:
+		return clampBacklogPriority(int(value)), true
+	case json.Number:
+		n, err := value.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return clampBacklogPriority(int(n)), true
+	case string:
+		return parseBacklogPriority(value)
+	default:
+		return parseBacklogPriority(fmt.Sprint(raw))
+	}
+}
+
+func clampBacklogPriority(priority int) int {
+	if priority < backlogPriorityMin {
+		return backlogPriorityMin
+	}
+	if priority > backlogPriorityMax {
+		return backlogPriorityMax
+	}
+	return priority
+}
+
 func appendExperimentAccessLinks(b *strings.Builder, item workflowItem, targetRepo string) {
 	readmePath := experimentReadmePath(item)
 	if readmePath != "" {
@@ -2172,7 +2287,7 @@ func defaultWorkerForKind(kind string) string {
 func instructionsForKind(kind string) string {
 	switch kind {
 	case kindBacklog:
-		return "Validate the backlog item. Review related_items and, only if they are tightly related, claim them with skynet_backlog action \"claim_related\" before editing. If the work is a broad rollup, milestone, stale, or missing acceptance criteria, use action \"refine\" with child backlog bullets. If actionable, implement it in the target repository, run focused verification, write or update the QA report, then complete the item or batch with item_id/item_ids. Complete queues QA automatically."
+		return "Validate the backlog item. Backlog claims are priority-aware; inspect priority metadata and use skynet_backlog action \"prioritize\" when related pending work should move up or down for the active feature. Review related_items and, only if they are tightly related, claim them with skynet_backlog action \"claim_related\" before editing. If the work is a broad rollup, milestone, stale, or missing acceptance criteria, use action \"refine\" with child backlog bullets and priority/feature when needed. If actionable, implement it in the target repository, run focused verification, write or update the QA report, then complete the item or batch with item_id/item_ids. Complete queues QA automatically."
 	case kindExperiment:
 		return "Read the linked experiment README/Mock/registry entry, build or validate the sandbox experiment, append findings as needed, then request channel review with skynet_experiments. If user feedback explicitly accepts the experiment, use approve_to_backlog."
 	case kindQA:

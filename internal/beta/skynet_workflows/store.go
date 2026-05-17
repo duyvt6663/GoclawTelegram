@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,16 @@ const (
 	statusDone       = "done"
 	statusFailed     = "failed"
 	statusDropped    = "dropped"
+)
+
+const (
+	backlogPriorityDefault         = 50
+	backlogPriorityMin             = 0
+	backlogPriorityMax             = 100
+	backlogPriorityAgingInterval   = 24 * time.Hour
+	backlogPriorityAgingStep       = 5
+	backlogPriorityPersistentBoost = 50
+	backlogPriorityAgeBoostMax     = 75
 )
 
 var validKinds = map[string]bool{
@@ -354,6 +365,9 @@ func absInt(value int) int {
 }
 
 func (s *featureStore) firstPending(tenantID, kind string) (*workflowItem, error) {
+	if kind == kindBacklog {
+		return s.firstPendingBacklog(tenantID)
+	}
 	rows, err := s.db.Query(`
 		SELECT id, tenant_id, kind, status, body, source, channel, chat_id, local_key,
 		       claimed_by, agent_key, result, metadata, created_at, updated_at
@@ -369,6 +383,18 @@ func (s *featureStore) firstPending(tenantID, kind string) (*workflowItem, error
 		return nil, rows.Err()
 	}
 	return scanWorkflowItem(rows)
+}
+
+func (s *featureStore) firstPendingBacklog(tenantID string) (*workflowItem, error) {
+	now := time.Now().UTC()
+	if err := s.boostBottomBacklogPrioritiesLocked(tenantID, now); err != nil {
+		return nil, err
+	}
+	items, err := s.listPendingBacklog(tenantID, 1, now)
+	if err != nil || len(items) == 0 {
+		return nil, err
+	}
+	return &items[0], nil
 }
 
 func (s *featureStore) getItem(tenantID, id string) (*workflowItem, error) {
@@ -392,6 +418,9 @@ func (s *featureStore) listItems(tenantID, kind, status string, limit int) ([]wo
 		limit = 20
 	}
 	status = strings.TrimSpace(status)
+	if kind == kindBacklog && status == statusPending {
+		return s.listPendingBacklog(tenantID, limit, time.Now().UTC())
+	}
 
 	var rows *sql.Rows
 	var err error
@@ -417,6 +446,44 @@ func (s *featureStore) listItems(tenantID, kind, status string, limit int) ([]wo
 			LIMIT $4`
 		rows, err = s.db.Query(query, strings.TrimSpace(tenantID), kind, status, limit)
 	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]workflowItem, 0)
+	for rows.Next() {
+		item, err := scanWorkflowItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *item)
+	}
+	return items, rows.Err()
+}
+
+func (s *featureStore) listPendingBacklog(tenantID string, limit int, now time.Time) ([]workflowItem, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	items, err := s.pendingBacklogItems(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	sortBacklogByPriority(items, now)
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, nil
+}
+
+func (s *featureStore) pendingBacklogItems(tenantID string) ([]workflowItem, error) {
+	rows, err := s.db.Query(`
+		SELECT id, tenant_id, kind, status, body, source, channel, chat_id, local_key,
+		       claimed_by, agent_key, result, metadata, created_at, updated_at
+		FROM beta_skynet_workflow_items
+		WHERE tenant_id=$1 AND kind=$2 AND status='pending'`,
+		strings.TrimSpace(tenantID), kindBacklog)
 	if err != nil {
 		return nil, err
 	}
@@ -506,6 +573,35 @@ func (s *featureStore) updateStatus(tenantID, id, status, result string, metadat
 	return s.getItem(tenantID, id)
 }
 
+func (s *featureStore) updateMetadata(tenantID, id string, metadata map[string]string) (*workflowItem, error) {
+	existing, err := s.getItem(tenantID, id)
+	if err != nil {
+		return nil, err
+	}
+	merged := cloneStringMap(existing.Metadata)
+	for key, value := range metadata {
+		merged[key] = value
+	}
+	metaJSON, err := json.Marshal(merged)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	res, err := s.db.Exec(`
+		UPDATE beta_skynet_workflow_items
+		SET metadata=$3, updated_at=$4
+		WHERE tenant_id=$1 AND id=$2`,
+		strings.TrimSpace(tenantID), strings.TrimSpace(id), string(metaJSON), now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return nil, fmt.Errorf("workflow item not found")
+	}
+	return s.getItem(tenantID, id)
+}
+
 func (s *featureStore) counts(tenantID string) ([]queueCounts, error) {
 	rows, err := s.db.Query(`
 		SELECT kind, status, COUNT(*)
@@ -556,6 +652,158 @@ func (s *featureStore) counts(tenantID string) ([]queueCounts, error) {
 		return nil, err
 	}
 	return []queueCounts{*byKind[kindChangeReq], *byKind[kindBacklog], *byKind[kindExperiment], *byKind[kindQA], *byKind[kindPR]}, nil
+}
+
+func sortBacklogByPriority(items []workflowItem, now time.Time) {
+	sort.SliceStable(items, func(i, j int) bool {
+		left := backlogPriorityScore(items[i], now)
+		right := backlogPriorityScore(items[j], now)
+		if left == right {
+			return items[i].CreatedAt.Before(items[j].CreatedAt)
+		}
+		return left > right
+	})
+}
+
+func (s *featureStore) boostBottomBacklogPrioritiesLocked(tenantID string, now time.Time) error {
+	items, err := s.pendingBacklogItems(tenantID)
+	if err != nil || len(items) < 2 {
+		return err
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		left := backlogPriorityScore(items[i], now)
+		right := backlogPriorityScore(items[j], now)
+		if left == right {
+			return items[i].CreatedAt.After(items[j].CreatedAt)
+		}
+		return left < right
+	})
+
+	boostCount := len(items) / 5
+	if boostCount < 1 {
+		boostCount = 1
+	}
+	for _, item := range items[:boostCount] {
+		if now.Sub(item.CreatedAt) < backlogPriorityAgingInterval {
+			continue
+		}
+		if boostedAt, ok := parsePriorityBoostedAt(item.Metadata["priority_boosted_at"]); ok && now.Sub(boostedAt) < backlogPriorityAgingInterval {
+			continue
+		}
+		currentBoost := backlogPriorityBoost(item.Metadata)
+		if currentBoost >= backlogPriorityPersistentBoost {
+			continue
+		}
+		nextBoost := currentBoost + backlogPriorityAgingStep
+		if nextBoost > backlogPriorityPersistentBoost {
+			nextBoost = backlogPriorityPersistentBoost
+		}
+		metadata := cloneStringMap(item.Metadata)
+		metadata["priority_boost"] = strconv.Itoa(nextBoost)
+		metadata["priority_boosted_at"] = now.Format(time.RFC3339)
+		metadata["priority_last_boost_reason"] = "bottom_queue_aging"
+		if _, err := s.updateMetadata(tenantID, item.ID, metadata); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func backlogPriorityScore(item workflowItem, now time.Time) int {
+	return backlogPriorityBase(item.Metadata) + backlogPriorityBoost(item.Metadata) + backlogPriorityAgeBoost(item, now)
+}
+
+func backlogPriorityBase(metadata map[string]string) int {
+	if priority, ok := parseBacklogPriority(metadata["priority"]); ok {
+		return priority
+	}
+	return backlogPriorityDefault
+}
+
+func backlogPriorityBoost(metadata map[string]string) int {
+	boost, err := strconv.Atoi(strings.TrimSpace(metadata["priority_boost"]))
+	if err != nil {
+		return 0
+	}
+	if boost < 0 {
+		return 0
+	}
+	if boost > backlogPriorityPersistentBoost {
+		return backlogPriorityPersistentBoost
+	}
+	return boost
+}
+
+func backlogPriorityAgeBoost(item workflowItem, now time.Time) int {
+	if item.CreatedAt.IsZero() || !now.After(item.CreatedAt) {
+		return 0
+	}
+	boost := int(now.Sub(item.CreatedAt) / backlogPriorityAgingInterval * backlogPriorityAgingStep)
+	if boost < 0 {
+		return 0
+	}
+	if boost > backlogPriorityAgeBoostMax {
+		return backlogPriorityAgeBoostMax
+	}
+	return boost
+}
+
+func parseBacklogPriority(value string) (int, bool) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return 0, false
+	}
+	switch value {
+	case "critical", "urgent", "highest":
+		return 100, true
+	case "high":
+		return 80, true
+	case "normal", "default", "medium":
+		return 50, true
+	case "low":
+		return 25, true
+	case "lowest":
+		return 0, true
+	}
+	if strings.HasPrefix(value, "p") && len(value) == 2 {
+		switch value {
+		case "p0":
+			return 100, true
+		case "p1":
+			return 80, true
+		case "p2":
+			return 60, true
+		case "p3":
+			return 40, true
+		case "p4":
+			return 20, true
+		}
+	}
+	priority, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, false
+	}
+	if priority < backlogPriorityMin {
+		priority = backlogPriorityMin
+	}
+	if priority > backlogPriorityMax {
+		priority = backlogPriorityMax
+	}
+	return priority, true
+}
+
+func parsePriorityBoostedAt(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	if ts, err := time.Parse(time.RFC3339, value); err == nil {
+		return ts, true
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return ts, true
+	}
+	return time.Time{}, false
 }
 
 func scanWorkflowItem(row itemScanner) (*workflowItem, error) {
