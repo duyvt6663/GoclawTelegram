@@ -17,6 +17,7 @@ const (
 	kindExperiment = "experiment"
 	kindQA         = "qa"
 	kindPR         = "pr"
+	kindChangeReq  = "change_request"
 
 	statusPending    = "pending"
 	statusInProgress = "in_progress"
@@ -32,6 +33,7 @@ var validKinds = map[string]bool{
 	kindExperiment: true,
 	kindQA:         true,
 	kindPR:         true,
+	kindChangeReq:  true,
 }
 
 type workflowItem struct {
@@ -440,10 +442,11 @@ func (s *featureStore) listRepoReferenceItems(tenantID string) ([]workflowItem, 
 		  AND status IN ('pending', 'in_progress', 'review', 'needs_refinement', 'failed')
 		ORDER BY
 		  CASE kind
-		    WHEN 'backlog' THEN 1
-		    WHEN 'experiment' THEN 2
-		    WHEN 'qa' THEN 3
-		    WHEN 'pr' THEN 4
+		    WHEN 'change_request' THEN 1
+		    WHEN 'backlog' THEN 2
+		    WHEN 'experiment' THEN 3
+		    WHEN 'qa' THEN 4
+		    WHEN 'pr' THEN 5
 		    ELSE 9
 		  END,
 		  CASE status
@@ -519,6 +522,7 @@ func (s *featureStore) counts(tenantID string) ([]queueCounts, error) {
 		kindExperiment: {Kind: kindExperiment},
 		kindQA:         {Kind: kindQA},
 		kindPR:         {Kind: kindPR},
+		kindChangeReq:  {Kind: kindChangeReq},
 	}
 	for rows.Next() {
 		var kind, status string
@@ -551,7 +555,7 @@ func (s *featureStore) counts(tenantID string) ([]queueCounts, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return []queueCounts{*byKind[kindBacklog], *byKind[kindExperiment], *byKind[kindQA], *byKind[kindPR]}, nil
+	return []queueCounts{*byKind[kindChangeReq], *byKind[kindBacklog], *byKind[kindExperiment], *byKind[kindQA], *byKind[kindPR]}, nil
 }
 
 func scanWorkflowItem(row itemScanner) (*workflowItem, error) {

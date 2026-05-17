@@ -51,8 +51,15 @@ func TestUpdateStatusMergesMetadataAndCountsRefinement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("counts: %v", err)
 	}
-	if counts[0].Refinement != 1 {
-		t.Fatalf("refinement count = %d, want 1: %#v", counts[0].Refinement, counts[0])
+	var backlogCounts queueCounts
+	for _, entry := range counts {
+		if entry.Kind == kindBacklog {
+			backlogCounts = entry
+			break
+		}
+	}
+	if backlogCounts.Refinement != 1 {
+		t.Fatalf("refinement count = %d, want 1: %#v", backlogCounts.Refinement, counts)
 	}
 }
 

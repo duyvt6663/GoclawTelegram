@@ -142,6 +142,8 @@ func (t *boardTool) Description() string {
 		return "Parse and manage Skynet QA bullets. QA workers claim one pending QA item, pass it into PR composition, or move failures to backlog."
 	case kindPR:
 		return "Manage post-QA PR composition items. PR workers claim one pending item, prepare a coherent pull request, then complete or fail it."
+	case kindChangeReq:
+		return "Submit and review Skynet change requests. CRs require explicit human review before they can become experiments or backlog work."
 	default:
 		return "Manage a Skynet workflow queue."
 	}
@@ -155,21 +157,26 @@ func (t *boardTool) Parameters() map[string]any {
 				"type": "string",
 				"enum": []string{
 					"add", "parse", "sync_repo", "list", "next", "complete", "refine", "split", "fail",
-					"claim_related", "pass", "fail_to_backlog", "request_review", "review_reminders", "approve_to_backlog", "revise", "drop",
+					"claim_related", "pass", "fail_to_backlog", "request_review", "review_reminders", "approve_to_backlog", "approve_to_experiment", "revise", "drop", "submit",
 				},
 			},
-			"text":      map[string]any{"type": "string", "description": "Raw text or bullet list to add. For refine/split, this is the child backlog bullet list to enqueue."},
-			"item_id":   map[string]any{"type": "string", "description": "Workflow item ID for status transitions."},
-			"item_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional list of related workflow item IDs for batch claim or batch completion."},
-			"result":    map[string]any{"type": "string", "description": "Result, validation summary, review request, failure evidence, or transition notes."},
-			"feedback":  map[string]any{"type": "string", "description": "User feedback for experiment revision or transition."},
-			"status":    map[string]any{"type": "string", "description": "Optional status filter for list."},
-			"limit":     map[string]any{"type": "integer", "description": "Optional list limit, max 100."},
-			"source":    map[string]any{"type": "string", "description": "Optional source label."},
-			"agent_key": map[string]any{"type": "string", "description": "Optional claiming agent key."},
-			"channel":   map[string]any{"type": "string", "description": "Optional channel override."},
-			"chat_id":   map[string]any{"type": "string", "description": "Optional chat override."},
-			"local_key": map[string]any{"type": "string", "description": "Optional topic/thread local key override."},
+			"text":            map[string]any{"type": "string", "description": "Raw text or bullet list to add. For refine/split, this is the child backlog bullet list to enqueue."},
+			"item_id":         map[string]any{"type": "string", "description": "Workflow item ID for status transitions."},
+			"item_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional list of related workflow item IDs for batch claim or batch completion."},
+			"result":          map[string]any{"type": "string", "description": "Result, validation summary, review request, failure evidence, or transition notes."},
+			"feedback":        map[string]any{"type": "string", "description": "User feedback for experiment revision or transition."},
+			"status":          map[string]any{"type": "string", "description": "Optional status filter for list."},
+			"limit":           map[string]any{"type": "integer", "description": "Optional list limit, max 100."},
+			"source":          map[string]any{"type": "string", "description": "Optional source label."},
+			"category":        map[string]any{"type": "string", "description": "Optional change-request category, such as ui_ux or functional."},
+			"route":           map[string]any{"type": "string", "description": "Optional change-request route: experiment for UI/UX work, backlog for functional-only work."},
+			"suggested_route": map[string]any{"type": "string", "description": "Optional alias for route."},
+			"erp":             map[string]any{"type": "string", "description": "Optional ERP/package slug related to a change request."},
+			"deployment_url":  map[string]any{"type": "string", "description": "Optional deployment URL reviewed for a change request."},
+			"agent_key":       map[string]any{"type": "string", "description": "Optional claiming agent key."},
+			"channel":         map[string]any{"type": "string", "description": "Optional channel override."},
+			"chat_id":         map[string]any{"type": "string", "description": "Optional chat override."},
+			"local_key":       map[string]any{"type": "string", "description": "Optional topic/thread local key override."},
 		},
 		"required": []string{"action"},
 	}
@@ -183,7 +190,13 @@ func (t *boardTool) Execute(ctx context.Context, args map[string]any) *tools.Res
 	tenantID := tenantKeyFromCtx(storepkg.TenantIDFromContext(ctx))
 
 	switch action {
-	case "add", "parse":
+	case "add", "parse", "submit":
+		if t.kind == kindChangeReq {
+			return t.submitChangeRequest(ctx, tenantID, args)
+		}
+		if action == "submit" {
+			return tools.ErrorResult("submit is only valid for skynet_change_requests")
+		}
 		return t.add(ctx, tenantID, args)
 	case "sync_repo":
 		switch t.kind {
@@ -233,6 +246,9 @@ func (t *boardTool) Execute(ctx context.Context, args map[string]any) *tools.Res
 		}
 		return jsonResult(payload)
 	case "next":
+		if t.kind == kindChangeReq {
+			return tools.ErrorResult("change requests require human review; use list/review_reminders, then approve_to_experiment or approve_to_backlog")
+		}
 		return t.next(ctx, tenantID, args)
 	case "complete":
 		if t.kind == kindQA {
@@ -272,20 +288,37 @@ func (t *boardTool) Execute(ctx context.Context, args map[string]any) *tools.Res
 		}
 		return t.requestExperimentReview(ctx, tenantID, args)
 	case "review_reminders":
-		if t.kind != kindExperiment {
-			return tools.ErrorResult("review_reminders is only valid for skynet_experiments")
+		switch t.kind {
+		case kindExperiment:
+			return t.publishExperimentReviewReminders(ctx, tenantID, args)
+		case kindChangeReq:
+			return t.publishChangeRequestReviewReminders(ctx, tenantID, args)
+		default:
+			return tools.ErrorResult("review_reminders is only valid for skynet_experiments and skynet_change_requests")
 		}
-		return t.publishExperimentReviewReminders(ctx, tenantID, args)
 	case "approve_to_backlog":
-		if t.kind != kindExperiment {
-			return tools.ErrorResult("approve_to_backlog is only valid for skynet_experiments")
+		switch t.kind {
+		case kindExperiment:
+			return t.approveExperimentToBacklog(ctx, tenantID, args)
+		case kindChangeReq:
+			return t.approveChangeRequest(ctx, tenantID, args, kindBacklog)
+		default:
+			return tools.ErrorResult("approve_to_backlog is only valid for skynet_experiments and skynet_change_requests")
 		}
-		return t.approveExperimentToBacklog(ctx, tenantID, args)
+	case "approve_to_experiment":
+		if t.kind != kindChangeReq {
+			return tools.ErrorResult("approve_to_experiment is only valid for skynet_change_requests")
+		}
+		return t.approveChangeRequest(ctx, tenantID, args, kindExperiment)
 	case "revise":
-		if t.kind != kindExperiment {
-			return tools.ErrorResult("revise is only valid for skynet_experiments")
+		switch t.kind {
+		case kindExperiment:
+			return t.reviseExperiment(ctx, tenantID, args)
+		case kindChangeReq:
+			return t.reviseChangeRequest(ctx, tenantID, args)
+		default:
+			return tools.ErrorResult("revise is only valid for skynet_experiments and skynet_change_requests")
 		}
-		return t.reviseExperiment(ctx, tenantID, args)
 	default:
 		return tools.ErrorResult("unsupported action: " + action)
 	}
@@ -829,6 +862,212 @@ func (t *boardTool) reviseExperiment(ctx context.Context, tenantID string, args 
 	return jsonResult(map[string]any{"status": "revision_queued", "old_item": updated, "new_items": newItems})
 }
 
+func (t *boardTool) submitChangeRequest(ctx context.Context, tenantID string, args map[string]any) *tools.Result {
+	text := stringArg(args, "text")
+	if text == "" {
+		return tools.ErrorResult("text is required")
+	}
+	category := normalizeChangeRequestCategory(stringArg(args, "category"))
+	route := normalizeChangeRequestRoute(stringArg(args, "route", "suggested_route"))
+	if route == "" {
+		route = inferChangeRequestRoute(text, category)
+	}
+	if category == "" {
+		category = defaultChangeRequestCategory(route)
+	}
+	result := stringArg(args, "result")
+	if result == "" {
+		result = "awaiting human review"
+	}
+
+	metadata := map[string]string{
+		"created_by_agent": tools.ToolAgentKeyFromCtx(ctx),
+		"transition":       "change_request_review_requested",
+		"suggested_route":  route,
+		"category":         category,
+		"human_review":     "required",
+	}
+	if erp := stringArg(args, "erp", "erp_slug"); erp != "" {
+		metadata["erp"] = erp
+	}
+	if deploymentURL := stringArg(args, "deployment_url"); deploymentURL != "" {
+		metadata["deployment_url"] = deploymentURL
+	}
+
+	items, err := t.feature.store.addItems(tenantID, kindChangeReq, parseBulletItems(text), originFromToolContext(ctx, args), stringArg(args, "source"), metadata)
+	if err != nil {
+		return tools.ErrorResult(err.Error())
+	}
+
+	updatedItems := make([]workflowItem, 0, len(items))
+	warnings := make([]string, 0)
+	for _, item := range items {
+		updated, err := t.feature.store.updateStatus(tenantID, item.ID, statusReview, result, metadata)
+		if err != nil {
+			return tools.ErrorResult(err.Error())
+		}
+		updatedItems = append(updatedItems, *updated)
+		if err := t.feature.publishChangeRequestReview(ctx, updated, result); err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: %s", updated.ID, err.Error()))
+		}
+	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
+
+	status := "review_requested"
+	if len(warnings) > 0 {
+		status = "review_pending_delivery"
+	}
+	return jsonResult(map[string]any{
+		"status":          status,
+		"count":           len(updatedItems),
+		"items":           updatedItems,
+		"suggested_route": route,
+		"category":        category,
+		"warnings":        warnings,
+	})
+}
+
+func (t *boardTool) publishChangeRequestReviewReminders(ctx context.Context, tenantID string, args map[string]any) *tools.Result {
+	limit := intArg(args, "limit")
+	published, total, err := t.feature.publishChangeRequestReviewReminders(ctx, tenantID, originFromToolContext(ctx, args), limit)
+	if err != nil {
+		return tools.ErrorResult(err.Error())
+	}
+	status := "no_review_items"
+	if published > 0 {
+		status = "review_reminder_published"
+	}
+	return jsonResult(map[string]any{
+		"status":          status,
+		"published_count": published,
+		"review_count":    total,
+	})
+}
+
+func (t *boardTool) approveChangeRequest(ctx context.Context, tenantID string, args map[string]any, targetKind string) *tools.Result {
+	itemID := stringArg(args, "item_id")
+	if itemID == "" {
+		return tools.ErrorResult("item_id is required")
+	}
+	if targetKind != kindExperiment && targetKind != kindBacklog {
+		return tools.ErrorResult("change requests can only be approved to experiment or backlog")
+	}
+	item, err := t.feature.store.getItem(tenantID, itemID)
+	if err != nil {
+		return tools.ErrorResult(err.Error())
+	}
+	if item.Kind != kindChangeReq {
+		return tools.ErrorResult("item is not a change request")
+	}
+	if item.Status != statusReview {
+		return tools.ErrorResult("change request must be in review before approval")
+	}
+
+	feedback := stringArg(args, "feedback", "result")
+	targetText := changeRequestApprovalBody(item, targetKind, feedback)
+	metadata := map[string]string{
+		"created_by_agent":      tools.ToolAgentKeyFromCtx(ctx),
+		"source_change_request": item.ID,
+		"transition":            "change_request_approved_to_" + targetKind,
+		"human_reviewed":        "true",
+		"category":              item.Metadata["category"],
+		"suggested_route":       item.Metadata["suggested_route"],
+	}
+	if metadata["suggested_route"] == "" {
+		metadata["suggested_route"] = targetKind
+	}
+	if erp := item.Metadata["erp"]; erp != "" {
+		metadata["erp"] = erp
+	}
+	if deploymentURL := item.Metadata["deployment_url"]; deploymentURL != "" {
+		metadata["deployment_url"] = deploymentURL
+	}
+
+	targetItems, err := t.feature.store.addItems(tenantID, targetKind, []string{targetText}, originFromItem(item), "change-request:"+item.ID, metadata)
+	if err != nil {
+		return tools.ErrorResult(err.Error())
+	}
+	queuedID := ""
+	if len(targetItems) > 0 {
+		queuedID = targetItems[0].ID
+	}
+	result := fmt.Sprintf("approved by human review and queued as %s item %s", targetKind, queuedID)
+	if feedback != "" {
+		result += "\n\nReviewer feedback:\n" + feedback
+	}
+	updated, err := t.feature.store.updateStatus(tenantID, item.ID, statusDone, result, map[string]string{
+		"transition":        "change_request_approved_to_" + targetKind,
+		"updated_by_agent":  tools.ToolAgentKeyFromCtx(ctx),
+		"queued_kind":       targetKind,
+		"queued_item":       queuedID,
+		"human_reviewed":    "true",
+		"review_resolution": "approved",
+	})
+	if err != nil {
+		return tools.ErrorResult(err.Error())
+	}
+	if err := t.feature.publishWorkflowUpdate(ctx, updated, "APPROVED -> "+strings.ToUpper(targetKind), result); err != nil {
+		slog.Warn("skynet change request approval notification failed", "item_id", updated.ID, "error", err)
+	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
+	return jsonResult(map[string]any{
+		"status":       "queued_for_" + targetKind,
+		"item":         updated,
+		"target_kind":  targetKind,
+		"target_items": targetItems,
+	})
+}
+
+func (t *boardTool) reviseChangeRequest(ctx context.Context, tenantID string, args map[string]any) *tools.Result {
+	itemID := stringArg(args, "item_id")
+	if itemID == "" {
+		return tools.ErrorResult("item_id is required")
+	}
+	feedback := stringArg(args, "feedback", "result")
+	if feedback == "" {
+		return tools.ErrorResult("feedback is required")
+	}
+	item, err := t.feature.store.getItem(tenantID, itemID)
+	if err != nil {
+		return tools.ErrorResult(err.Error())
+	}
+	if item.Kind != kindChangeReq {
+		return tools.ErrorResult("item is not a change request")
+	}
+
+	body := item.Body + "\n\nReview feedback to address:\n" + feedback
+	metadata := cloneStringMap(item.Metadata)
+	metadata["created_by_agent"] = tools.ToolAgentKeyFromCtx(ctx)
+	metadata["source_change_request"] = item.ID
+	metadata["transition"] = "change_request_revision_requested"
+	metadata["human_review"] = "required"
+	newItems, err := t.feature.store.addItems(tenantID, kindChangeReq, []string{body}, originFromItem(item), "change-request-revision:"+item.ID, metadata)
+	if err != nil {
+		return tools.ErrorResult(err.Error())
+	}
+	reviewedItems := make([]workflowItem, 0, len(newItems))
+	for _, newItem := range newItems {
+		updatedNew, err := t.feature.store.updateStatus(tenantID, newItem.ID, statusReview, "revision requested by human review", metadata)
+		if err != nil {
+			return tools.ErrorResult(err.Error())
+		}
+		reviewedItems = append(reviewedItems, *updatedNew)
+		if err := t.feature.publishChangeRequestReview(ctx, updatedNew, "revision requested by human review"); err != nil {
+			slog.Warn("skynet change request revision review notification failed", "item_id", updatedNew.ID, "error", err)
+		}
+	}
+	updated, err := t.feature.store.updateStatus(tenantID, itemID, statusDropped, "superseded by revised change request", map[string]string{
+		"transition":        "superseded_by_change_request_revision",
+		"updated_by_agent":  tools.ToolAgentKeyFromCtx(ctx),
+		"review_resolution": "revision_requested",
+	})
+	if err != nil {
+		return tools.ErrorResult(err.Error())
+	}
+	t.feature.refreshRepoWorkflowReference(ctx, tenantID)
+	return jsonResult(map[string]any{"status": "revision_queued", "old_item": updated, "new_items": reviewedItems})
+}
+
 type ciFailureTool struct {
 	feature *SkynetWorkflowsFeature
 }
@@ -1289,6 +1528,89 @@ func (f *SkynetWorkflowsFeature) publishExperimentReviewReminders(ctx context.Co
 	return len(items), total, nil
 }
 
+func (f *SkynetWorkflowsFeature) publishChangeRequestReview(ctx context.Context, item *workflowItem, result string) error {
+	if f.msgBus == nil {
+		return fmt.Errorf("message bus is unavailable")
+	}
+	origin := originFromItem(item)
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		origin = f.configuredOrigin(ctx)
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		return fmt.Errorf("review channel is not configured")
+	}
+	chatID := origin.ChatID
+	if origin.LocalKey != "" {
+		chatID = origin.LocalKey
+	}
+	metadata := map[string]string{}
+	if origin.LocalKey != "" {
+		metadata["local_key"] = origin.LocalKey
+		if threadID := threadIDFromLocalKey(origin.LocalKey); threadID != "" {
+			metadata[tools.MetaMessageThreadID] = threadID
+		}
+	}
+	f.msgBus.PublishOutbound(bus.OutboundMessage{
+		Channel:  origin.Channel,
+		ChatID:   chatID,
+		Content:  changeRequestReviewMessage(item, result, f.resolveTargetRepo(ctx)),
+		Metadata: metadata,
+	})
+	return nil
+}
+
+func (f *SkynetWorkflowsFeature) publishChangeRequestReviewReminders(ctx context.Context, tenantID string, origin workflowOrigin, limit int) (int, int, error) {
+	if limit <= 0 || limit > 20 {
+		limit = 10
+	}
+	items, err := f.store.listItems(tenantID, kindChangeReq, statusReview, limit)
+	if err != nil {
+		return 0, 0, err
+	}
+	total := len(items)
+	if counts, err := f.store.counts(tenantID); err == nil {
+		for _, entry := range counts {
+			if entry.Kind == kindChangeReq {
+				total = entry.Review
+				break
+			}
+		}
+	}
+	if len(items) == 0 {
+		return 0, total, nil
+	}
+	if f.msgBus == nil {
+		return 0, total, fmt.Errorf("message bus is unavailable")
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		origin = f.configuredOrigin(ctx)
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		origin = originFromItem(&items[0])
+	}
+	if origin.Channel == "" || (origin.ChatID == "" && origin.LocalKey == "") {
+		return 0, total, fmt.Errorf("review channel is not configured")
+	}
+	chatID := origin.ChatID
+	if origin.LocalKey != "" {
+		chatID = origin.LocalKey
+	}
+	metadata := map[string]string{}
+	if origin.LocalKey != "" {
+		metadata["local_key"] = origin.LocalKey
+		if threadID := threadIDFromLocalKey(origin.LocalKey); threadID != "" {
+			metadata[tools.MetaMessageThreadID] = threadID
+		}
+	}
+	f.msgBus.PublishOutbound(bus.OutboundMessage{
+		Channel:  origin.Channel,
+		ChatID:   chatID,
+		Content:  changeRequestReviewReminderMessage(items, total, f.resolveTargetRepo(ctx), time.Now().UTC()),
+		Metadata: metadata,
+	})
+	return len(items), total, nil
+}
+
 func (f *SkynetWorkflowsFeature) publishWorkflowUpdate(ctx context.Context, item *workflowItem, transition, result string) error {
 	if f.msgBus == nil {
 		return fmt.Errorf("message bus is unavailable")
@@ -1433,6 +1755,8 @@ func queueIdleLogInterval(kind string) time.Duration {
 	switch kind {
 	case kindExperiment:
 		return time.Hour
+	case kindChangeReq:
+		return 5 * time.Minute
 	default:
 		return 30 * time.Minute
 	}
@@ -1484,6 +1808,189 @@ func experimentReviewReminderMessage(items []workflowItem, total int, targetRepo
 		fmt.Fprintf(&b, "\nShowing %d of %d review items.", len(items), total)
 	}
 	return b.String()
+}
+
+func changeRequestReviewMessage(item *workflowItem, result, targetRepo string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "🟥 **SKYNET CHANGE REQUEST REVIEW REQUIRED**\nItem: %s\nSuggested route: `%s`\nCategory: `%s`\n\nChange request:\n%s\n\n",
+		item.ID,
+		changeRequestSuggestedRoute(item),
+		changeRequestCategory(item),
+		item.Body,
+	)
+	appendRepoWorkflowReferenceLink(&b, targetRepo)
+	if result != "" {
+		fmt.Fprintf(&b, "\nReview context:\n%s\n", result)
+	}
+	b.WriteString("\nDecision needed: approve to experiment for UI/UX validation, approve to backlog for functional-only implementation, request revision, or drop.\n")
+	return b.String()
+}
+
+func changeRequestReviewReminderMessage(items []workflowItem, total int, targetRepo string, now time.Time) string {
+	if total <= 0 {
+		total = len(items)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "🟥 **SKYNET CHANGE REQUEST REVIEW REMINDER**\nPending change-request reviews: %d\n", total)
+	fmt.Fprintf(&b, "RED review items block experiments/backlog until a human approves, revises, or drops them. This reminder repeats every 5 minutes while CRs remain in review.\n")
+	appendRepoWorkflowReferenceLink(&b, targetRepo)
+	for i, item := range items {
+		fmt.Fprintf(&b, "\n%d. **%s**\nItem: `%s`\nSource: `%s`\nSuggested route: `%s`\nCategory: `%s`\n",
+			i+1,
+			changeRequestTitle(item),
+			item.ID,
+			item.Source,
+			changeRequestSuggestedRoute(&item),
+			changeRequestCategory(&item),
+		)
+		if !item.UpdatedAt.IsZero() {
+			fmt.Fprintf(&b, "Waiting since: `%s UTC`", item.UpdatedAt.UTC().Format("2006-01-02 15:04"))
+			if now.After(item.UpdatedAt) {
+				fmt.Fprintf(&b, " (%s)", now.Sub(item.UpdatedAt).Round(time.Minute))
+			}
+			b.WriteByte('\n')
+		}
+		if erp := strings.TrimSpace(item.Metadata["erp"]); erp != "" {
+			fmt.Fprintf(&b, "ERP: `%s`\n", erp)
+		}
+		if deploymentURL := strings.TrimSpace(item.Metadata["deployment_url"]); deploymentURL != "" {
+			fmt.Fprintf(&b, "Deployment: %s\n", deploymentURL)
+		}
+		b.WriteString("Decision needed: approve to experiment, approve to backlog, request revision, or drop.\n")
+	}
+	if len(items) < total {
+		fmt.Fprintf(&b, "\nShowing %d of %d review items.", len(items), total)
+	}
+	return b.String()
+}
+
+func appendRepoWorkflowReferenceLink(b *strings.Builder, targetRepo string) {
+	if link := repoGitHubFileURL(targetRepo, repoWorkflowReferenceRelPath); link != "" {
+		fmt.Fprintf(b, "Workflow queue reference: [%s](%s)\n", repoWorkflowReferenceRelPath, link)
+		return
+	}
+	fmt.Fprintf(b, "Workflow queue reference: `%s`\n", repoWorkflowReferenceRelPath)
+}
+
+func changeRequestTitle(item workflowItem) string {
+	for _, line := range strings.Split(item.Body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if len(line) > 120 {
+			return line[:120] + "..."
+		}
+		return line
+	}
+	return item.ID
+}
+
+func changeRequestSuggestedRoute(item *workflowItem) string {
+	if item == nil {
+		return ""
+	}
+	route := normalizeChangeRequestRoute(item.Metadata["suggested_route"])
+	if route == "" {
+		route = inferChangeRequestRoute(item.Body, item.Metadata["category"])
+	}
+	return route
+}
+
+func changeRequestCategory(item *workflowItem) string {
+	if item == nil {
+		return ""
+	}
+	category := normalizeChangeRequestCategory(item.Metadata["category"])
+	if category == "" {
+		category = defaultChangeRequestCategory(changeRequestSuggestedRoute(item))
+	}
+	return category
+}
+
+func changeRequestApprovalBody(item *workflowItem, targetKind, feedback string) string {
+	targetLabel := "implementation backlog"
+	nextStep := "Implement the approved functional change, run focused verification, and route completed work to QA."
+	if targetKind == kindExperiment {
+		targetLabel = "UI/UX experiment"
+		nextStep = "Validate the approved UI/UX direction in the experiment surface before any production backlog implementation."
+	}
+	return fmt.Sprintf(`Approved change request for %s.
+
+Change request ID: %s
+Suggested route: %s
+Category: %s
+
+Request:
+%s
+
+Reviewer feedback:
+%s
+
+Next step:
+%s
+`, targetLabel, item.ID, changeRequestSuggestedRoute(item), changeRequestCategory(item), item.Body, feedback, nextStep)
+}
+
+func normalizeChangeRequestRoute(route string) string {
+	route = strings.ToLower(strings.TrimSpace(route))
+	route = strings.ReplaceAll(route, "-", "_")
+	switch route {
+	case "experiment", "experiments", "ui", "ux", "ui_ux", "design", "visual":
+		return kindExperiment
+	case "backlog", "functional", "function", "implementation", "impl":
+		return kindBacklog
+	default:
+		return ""
+	}
+}
+
+func normalizeChangeRequestCategory(category string) string {
+	category = strings.ToLower(strings.TrimSpace(category))
+	category = strings.ReplaceAll(category, "-", "_")
+	switch category {
+	case "ui", "ux", "ui_ux", "visual", "design", "interaction":
+		return "ui_ux"
+	case "functional", "function", "implementation", "system", "module", "backend":
+		return "functional"
+	default:
+		return category
+	}
+}
+
+func inferChangeRequestRoute(text, category string) string {
+	category = normalizeChangeRequestCategory(category)
+	if category == "ui_ux" {
+		return kindExperiment
+	}
+	lower := strings.ToLower(text)
+	for _, token := range []string{"ui/ux", "visual", "layout", "design", "interaction", "copy", "affordance", "responsive", "accessibility"} {
+		if strings.Contains(lower, token) {
+			return kindExperiment
+		}
+	}
+	if containsLowerWord(lower, "ui") || containsLowerWord(lower, "ux") {
+		return kindExperiment
+	}
+	return kindBacklog
+}
+
+func defaultChangeRequestCategory(route string) string {
+	if normalizeChangeRequestRoute(route) == kindExperiment {
+		return "ui_ux"
+	}
+	return "functional"
+}
+
+func containsLowerWord(text, word string) bool {
+	for _, field := range strings.FieldsFunc(text, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	}) {
+		if field == word {
+			return true
+		}
+	}
+	return false
 }
 
 func appendExperimentAccessLinks(b *strings.Builder, item workflowItem, targetRepo string) {
@@ -1655,6 +2162,8 @@ func defaultWorkerForKind(kind string) string {
 		return agentKeyQAIterator
 	case kindPR:
 		return agentKeyPRComposer
+	case kindChangeReq:
+		return agentKeyERPUXWalker
 	default:
 		return agentKeySkynet
 	}
@@ -1670,6 +2179,8 @@ func instructionsForKind(kind string) string {
 		return "Verify the QA item. Pass it if behavior is correct; this queues skynet_pr work automatically. Otherwise use fail_to_backlog with exact failure evidence."
 	case kindPR:
 		return "Compose a comprehensive PR from the QA-passed work. Inspect git status/commits, cherry-pick or stage only coherent scoped changes, verify, then complete with branch, commits, files, verification, and PR URL/body or fail with blockers."
+	case kindChangeReq:
+		return "Do not implement a change request directly. Keep it in human review until a human approves it to experiment or backlog, requests revision, or drops it."
 	default:
 		return "Process one item and update its status."
 	}

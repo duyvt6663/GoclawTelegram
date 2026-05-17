@@ -681,3 +681,161 @@ func TestExperimentReviewReminderPublishesAccessLinks(t *testing.T) {
 		}
 	}
 }
+
+func TestChangeRequestSubmitRequiresReviewAndPublishesRedReminder(t *testing.T) {
+	t.Setenv("GOCLAW_SKYNET_TARGET_REPO", "")
+	store := newTestFeatureStore(t)
+	msgBus := bus.New()
+	tenantID := storepkg.MasterTenantID.String()
+	repo := t.TempDir()
+	gitDir := filepath.Join(repo, ".git")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	config := "[remote \"origin\"]\n\turl = git@github.com-spartan-duykhanh:duyvt6663/ResearchCrafters.git\n"
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tool := &boardTool{
+		feature: &SkynetWorkflowsFeature{
+			store:      store,
+			msgBus:     msgBus,
+			targetRepo: repo,
+		},
+		name: "skynet_change_requests",
+		kind: kindChangeReq,
+	}
+	result := tool.Execute(context.Background(), map[string]any{
+		"action":    "submit",
+		"text":      "W2 question stack needs clearer progress feedback between writing questions.",
+		"route":     "experiment",
+		"category":  "ui_ux",
+		"erp":       "w2-question-stack",
+		"channel":   "telegram",
+		"chat_id":   "chat-review",
+		"local_key": "chat-review:topic:42",
+	})
+	if result.IsError {
+		t.Fatalf("submit returned error: %s", result.ForLLM)
+	}
+	if !strings.Contains(result.ForLLM, `"status": "review_requested"`) {
+		t.Fatalf("submit result missing review status: %s", result.ForLLM)
+	}
+
+	items, err := store.listItems(tenantID, kindChangeReq, statusReview, 10)
+	if err != nil {
+		t.Fatalf("list change requests: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("review CR count = %d, want 1: %#v", len(items), items)
+	}
+	if items[0].Metadata["human_review"] != "required" || items[0].Metadata["suggested_route"] != kindExperiment {
+		t.Fatalf("review metadata = %#v", items[0].Metadata)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	outbound, ok := msgBus.SubscribeOutbound(ctx)
+	if !ok {
+		t.Fatal("expected outbound CR review request")
+	}
+	for _, want := range []string{
+		"🟥 **SKYNET CHANGE REQUEST REVIEW REQUIRED**",
+		"Suggested route: `experiment`",
+		"Workflow queue reference: [backlog/99-skynet-workflow-queue.md](https://github.com/duyvt6663/ResearchCrafters/blob/main/backlog/99-skynet-workflow-queue.md)",
+		"approve to experiment",
+		"approve to backlog",
+	} {
+		if !strings.Contains(outbound.Content, want) {
+			t.Fatalf("CR review request missing %q:\n%s", want, outbound.Content)
+		}
+	}
+
+	result = tool.Execute(context.Background(), map[string]any{
+		"action":    "review_reminders",
+		"channel":   "telegram",
+		"chat_id":   "chat-review",
+		"local_key": "chat-review:topic:42",
+	})
+	if result.IsError {
+		t.Fatalf("review_reminders returned error: %s", result.ForLLM)
+	}
+	outbound, ok = msgBus.SubscribeOutbound(ctx)
+	if !ok {
+		t.Fatal("expected outbound CR reminder")
+	}
+	for _, want := range []string{
+		"🟥 **SKYNET CHANGE REQUEST REVIEW REMINDER**",
+		"RED review items block experiments/backlog",
+		items[0].ID,
+		"ERP: `w2-question-stack`",
+		"Decision needed: approve to experiment, approve to backlog, request revision, or drop.",
+	} {
+		if !strings.Contains(outbound.Content, want) {
+			t.Fatalf("CR reminder missing %q:\n%s", want, outbound.Content)
+		}
+	}
+}
+
+func TestChangeRequestApprovalQueuesExperimentOrBacklog(t *testing.T) {
+	store := newTestFeatureStore(t)
+	tenantID := storepkg.MasterTenantID.String()
+	items, err := store.addItems(tenantID, kindChangeReq, []string{
+		"Navigation between ERP stages feels visually ambiguous.",
+	}, workflowOrigin{}, "erp-ux-walker", map[string]string{
+		"suggested_route": kindExperiment,
+		"category":        "ui_ux",
+		"human_review":    "required",
+	})
+	if err != nil {
+		t.Fatalf("add change request: %v", err)
+	}
+	reviewItem, err := store.updateStatus(tenantID, items[0].ID, statusReview, "awaiting human review", map[string]string{
+		"transition": "change_request_review_requested",
+	})
+	if err != nil {
+		t.Fatalf("mark review: %v", err)
+	}
+
+	tool := &boardTool{
+		feature: &SkynetWorkflowsFeature{store: store},
+		name:    "skynet_change_requests",
+		kind:    kindChangeReq,
+	}
+	result := tool.Execute(context.Background(), map[string]any{
+		"action":   "approve_to_experiment",
+		"item_id":  reviewItem.ID,
+		"feedback": "Approved for a sandbox pass before implementation.",
+	})
+	if result.IsError {
+		t.Fatalf("approve returned error: %s", result.ForLLM)
+	}
+
+	updated, err := store.getItem(tenantID, reviewItem.ID)
+	if err != nil {
+		t.Fatalf("get CR: %v", err)
+	}
+	if updated.Status != statusDone {
+		t.Fatalf("CR status = %q, want done", updated.Status)
+	}
+	if updated.Metadata["queued_kind"] != kindExperiment || updated.Metadata["human_reviewed"] != "true" {
+		t.Fatalf("CR approval metadata = %#v", updated.Metadata)
+	}
+	experimentItems, err := store.listItems(tenantID, kindExperiment, statusPending, 10)
+	if err != nil {
+		t.Fatalf("list experiments: %v", err)
+	}
+	if len(experimentItems) != 1 {
+		t.Fatalf("experiment items = %d, want 1: %#v", len(experimentItems), experimentItems)
+	}
+	if experimentItems[0].Source != "change-request:"+reviewItem.ID {
+		t.Fatalf("experiment source = %q", experimentItems[0].Source)
+	}
+	if !strings.Contains(experimentItems[0].Body, "Approved change request for UI/UX experiment") {
+		t.Fatalf("experiment body = %q", experimentItems[0].Body)
+	}
+}
