@@ -39,6 +39,7 @@ const (
 	agentKeyPRComposer         = "skynet-pr-composer"
 	agentKeyFeedbackPlanner    = "skynet-feedback-planner"
 	agentKeyWorktreeJanitor    = "skynet-worktree-janitor"
+	agentKeyRefactorScout      = "skynet-refactor-scout"
 	agentKeyERPUXWalker        = "skynet-erp-ux-walker"
 
 	providerNameSkynetClaudeCLI = "skynet-claude-cli"
@@ -237,6 +238,8 @@ func (f *SkynetWorkflowsFeature) workflowAgentSpecs(ctx context.Context) []workf
 	codingTools = append(codingTools, "message")
 	uxReviewTools := append([]string{}, codingTools...)
 	uxReviewTools = append(uxReviewTools, "browser", "read_file", "list_files", "exec")
+	refactorScoutTools := append([]string{}, codingTools...)
+	refactorScoutTools = append(refactorScoutTools, "read_file", "list_files", "exec", "memory_search", "memory_get")
 	targetWorkspace := targetRepo
 	if targetWorkspace == "" {
 		targetWorkspace = safeWorkspace(f.workspace, "skynet-target")
@@ -350,6 +353,18 @@ func (f *SkynetWorkflowsFeature) workflowAgentSpecs(ctx context.Context) []workf
 			Workspace:         targetWorkspace,
 			Tools:             []string{"skynet_worktree_cleanup", "message"},
 			Role:              "worktree-janitor",
+		},
+		{
+			Key:               agentKeyRefactorScout,
+			DisplayName:       "Skynet Refactor Scout",
+			Frontmatter:       "Scoped maintainability reviewer that samples target repo modules, tracks recurring anti-patterns, and submits human-reviewed refactor change requests.",
+			ProviderKind:      storepkg.ProviderClaudeCLI,
+			Model:             modelClaudeOpus47,
+			ReasoningEffort:   reasoningHigh,
+			MaxToolIterations: 30,
+			Workspace:         targetWorkspace,
+			Tools:             refactorScoutTools,
+			Role:              "refactor-scout",
 		},
 		{
 			Key:               agentKeyERPUXWalker,
@@ -648,6 +663,16 @@ Operational rules:
 2. Do not remove files or directories manually. The cleanup tool only removes clean, unlocked worktrees whose HEAD is already contained in the base branch.
 3. Report removed and skipped worktrees. Skipped dirty, locked, protected, unmerged, or detached worktrees are not failures.
 `
+	case "refactor-scout":
+		roleRules = `Refactor scout flow:
+1. Call skynet_workflows with action "status" to confirm the target repository. Search prior agent memory with memory_search for refactor, anti-pattern, code health, and the module names you are considering; use memory_get only for relevant hits.
+2. Inspect active work before choosing scope: list skynet_change_requests in review, skynet_backlog pending items, skynet_experiments in pending/review, and skynet_qa pending items. Do not duplicate existing CRs, backlog, experiments, or QA failures.
+3. Choose one bounded code slice per run, not the whole repo. Rank candidate slices by recent git update time, feature importance, churn, and coverage across frontend, backend, CLI, schema, tests, and workflow code over time. Keep the selected scope to roughly one module directory or 3-8 related files.
+4. Read the selected files and nearby tests/contracts. Look for maintainability issues from big architecture to small conventions: duplicated flow, unclear ownership boundaries, expensive or fragile code paths, schema drift, frontend state/layout anti-patterns, backend error-handling gaps, CLI contract inconsistencies, missing tests, and patterns that future agents should avoid.
+5. Submit each worthwhile suggestion through skynet_change_requests with action "submit", route "backlog", and category "refactor" or "technical_debt". Do not edit code, write direct backlog items, or create experiments from this role.
+6. Each CR must include sampled scope, files inspected, anti-pattern evidence, why it matters, suggested refactor, expected validation, duplicate check, and a short convention note future agents should remember.
+7. End with a concise memory-oriented summary of the sampled scope, recurring anti-pattern labels, submitted CR IDs, and areas intentionally skipped so later runs can avoid repeating the same review.
+`
 	case "erp-ux-walker":
 		roleRules = `ERP UX walkthrough flow:
 1. Before opening the website, call skynet_workflows status for the target repo/deployment settings, then inspect incoming work that may affect UI/UX: list skynet_change_requests in review, skynet_experiments in review/pending, skynet_backlog pending items with UI/UX wording, and skynet_qa pending UI-facing items. Use this to avoid duplicate CRs or conflicting product decisions.
@@ -766,26 +791,15 @@ func preferredProviderForKind(providers []storepkg.LLMProviderData, providerKind
 	return best.choice
 }
 
-func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
-	if f.cronStore == nil {
-		return nil
-	}
-	agents, err := f.ensureAgents(ctx)
-	if err != nil {
-		return err
-	}
-	agentIDs := map[string]string{}
-	for _, ag := range agents {
-		agentIDs[ag.AgentKey] = ag.ID.String()
-	}
-	target := f.configuredOrigin(ctx)
+type workflowCronSpec struct {
+	Name     string
+	AgentKey string
+	EveryMS  int64
+	Message  string
+}
 
-	specs := []struct {
-		Name     string
-		AgentKey string
-		EveryMS  int64
-		Message  string
-	}{
+func (f *SkynetWorkflowsFeature) workflowCronSpecs() []workflowCronSpec {
+	return []workflowCronSpec{
 		{
 			Name:     "skynet backlog iterator",
 			AgentKey: agentKeyBacklogIterator,
@@ -829,12 +843,34 @@ func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
 			Message:  `Run one Skynet worktree cleanup. Call mcp__goclaw-bridge__skynet_worktree_cleanup with action "run", base_branch "main", and remove_branches false. Do not manually delete files or directories. Report removed worktrees and skipped worktrees with reasons.`,
 		},
 		{
+			Name:     "skynet refactor scout",
+			AgentKey: agentKeyRefactorScout,
+			EveryMS:  30 * 60 * 1000,
+			Message:  `Run one scoped Skynet refactor scout pass. First call mcp__goclaw-bridge__skynet_workflows action "status", search agent memory for prior refactor or anti-pattern notes, and inspect existing review/pending work with skynet_change_requests, skynet_backlog, skynet_experiments, and skynet_qa so you do not duplicate suggestions. Pick one bounded code slice using recent git update time, feature importance, churn, and module coverage across frontend, backend, CLI, schema, tests, and workflow code; do not review the whole repo. Read the selected files and nearby tests/contracts, identify concrete maintainability refactors, and submit worthwhile suggestions only through mcp__goclaw-bridge__skynet_change_requests action "submit" with route "backlog" and category "refactor" or "technical_debt". Do not edit code or write direct backlog/experiment items. Include sampled scope, files inspected, anti-pattern evidence, suggested refactor, validation plan, duplicate check, and future convention note in each CR, then finish with a memory-oriented summary of scope and anti-pattern labels.`,
+		},
+		{
 			Name:     "skynet erp ux walkthrough",
 			AgentKey: agentKeyERPUXWalker,
 			EveryMS:  24 * 60 * 60 * 1000,
 			Message:  `Run one daily Skynet ERP UX walkthrough with Claude Opus 4.7 xhigh. First call mcp__goclaw-bridge__skynet_workflows action "status" for target repo and web_port, then inspect incoming UI/UX-affecting work so you do not duplicate decisions: call mcp__goclaw-bridge__skynet_change_requests list status "review", mcp__goclaw-bridge__skynet_experiments list, mcp__goclaw-bridge__skynet_backlog list status "pending" limit 50, and mcp__goclaw-bridge__skynet_qa list status "pending" limit 20. Then use the browser against the configured local deployment and play through one ERP end-to-end, evaluating UI, UX, copy, layout, responsiveness, accessibility cues, and module/system support gaps. For every gap, call mcp__goclaw-bridge__skynet_change_requests action "submit"; route UI/UX questions to "experiment" with category "ui_ux", and functional-only gaps to "backlog" with category "functional". Do not write directly to experiments or backlog; RED change-request review must precede both.`,
 		},
 	}
+}
+
+func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
+	if f.cronStore == nil {
+		return nil
+	}
+	agents, err := f.ensureAgents(ctx)
+	if err != nil {
+		return err
+	}
+	agentIDs := map[string]string{}
+	for _, ag := range agents {
+		agentIDs[ag.AgentKey] = ag.ID.String()
+	}
+	target := f.configuredOrigin(ctx)
+	specs := f.workflowCronSpecs()
 
 	jobs := f.cronStore.ListJobs(ctx, true, "", "")
 	for _, spec := range specs {

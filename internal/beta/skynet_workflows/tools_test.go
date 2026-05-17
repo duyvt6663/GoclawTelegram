@@ -279,6 +279,30 @@ func TestPRComposerContextIncludesPRBodyRules(t *testing.T) {
 	}
 }
 
+func TestRefactorScoutContextIncludesScopeMemoryAndCRRules(t *testing.T) {
+	feature := &SkynetWorkflowsFeature{targetRepo: "/repo"}
+	files := feature.contextFilesForSpec(workflowAgentSpec{
+		DisplayName: "Skynet Refactor Scout",
+		Frontmatter: "Scoped maintainability reviewer",
+		Role:        "refactor-scout",
+	}, "/repo")
+	content := files[bootstrap.AgentsFile]
+
+	for _, want := range []string{
+		"memory_search",
+		"list skynet_change_requests in review",
+		"one bounded code slice per run",
+		"3-8 related files",
+		"category \"refactor\" or \"technical_debt\"",
+		"Do not edit code",
+		"future agents should remember",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("refactor scout context missing %q:\n%s", want, content)
+		}
+	}
+}
+
 func TestBacklogCompleteQueuesQAItem(t *testing.T) {
 	store := newTestFeatureStore(t)
 	tenantID := storepkg.MasterTenantID.String()
@@ -825,6 +849,28 @@ func TestChangeRequestSubmitRequiresReviewAndPublishesRedReminder(t *testing.T) 
 	} {
 		if !strings.Contains(outbound.Content, want) {
 			t.Fatalf("CR reminder missing %q:\n%s", want, outbound.Content)
+		}
+	}
+}
+
+func TestChangeRequestCategorySupportsRefactorMetadata(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{input: "refactoring", want: "refactor"},
+		{input: "code-health", want: "refactor"},
+		{input: "technical debt", want: "technical_debt"},
+		{input: "tech_debt", want: "technical_debt"},
+	}
+	for _, tc := range cases {
+		if got := normalizeChangeRequestCategory(tc.input); got != tc.want {
+			t.Fatalf("normalizeChangeRequestCategory(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+	for _, input := range []string{"refactor", "technical-debt", "code health"} {
+		if got := normalizeChangeRequestRoute(input); got != kindBacklog {
+			t.Fatalf("normalizeChangeRequestRoute(%q) = %q, want %q", input, got, kindBacklog)
 		}
 	}
 }

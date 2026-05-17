@@ -168,8 +168,8 @@ func (t *boardTool) Parameters() map[string]any {
 			"status":          map[string]any{"type": "string", "description": "Optional status filter for list."},
 			"limit":           map[string]any{"type": "integer", "description": "Optional list limit, max 100."},
 			"source":          map[string]any{"type": "string", "description": "Optional source label."},
-			"category":        map[string]any{"type": "string", "description": "Optional change-request category, such as ui_ux or functional."},
-			"route":           map[string]any{"type": "string", "description": "Optional change-request route: experiment for UI/UX work, backlog for functional-only work."},
+			"category":        map[string]any{"type": "string", "description": "Optional change-request category, such as ui_ux, functional, refactor, or technical_debt."},
+			"route":           map[string]any{"type": "string", "description": "Optional change-request route: experiment for UI/UX work, backlog for functional/refactor work."},
 			"suggested_route": map[string]any{"type": "string", "description": "Optional alias for route."},
 			"erp":             map[string]any{"type": "string", "description": "Optional ERP/package slug related to a change request."},
 			"deployment_url":  map[string]any{"type": "string", "description": "Optional deployment URL reviewed for a change request."},
@@ -1993,10 +1993,11 @@ Next step:
 func normalizeChangeRequestRoute(route string) string {
 	route = strings.ToLower(strings.TrimSpace(route))
 	route = strings.ReplaceAll(route, "-", "_")
+	route = strings.ReplaceAll(route, " ", "_")
 	switch route {
 	case "experiment", "experiments", "ui", "ux", "ui_ux", "design", "visual":
 		return kindExperiment
-	case "backlog", "functional", "function", "implementation", "impl":
+	case "backlog", "functional", "function", "implementation", "impl", "refactor", "technical_debt", "tech_debt", "maintainability", "code_health":
 		return kindBacklog
 	default:
 		return ""
@@ -2006,11 +2007,16 @@ func normalizeChangeRequestRoute(route string) string {
 func normalizeChangeRequestCategory(category string) string {
 	category = strings.ToLower(strings.TrimSpace(category))
 	category = strings.ReplaceAll(category, "-", "_")
+	category = strings.ReplaceAll(category, " ", "_")
 	switch category {
 	case "ui", "ux", "ui_ux", "visual", "design", "interaction":
 		return "ui_ux"
 	case "functional", "function", "implementation", "system", "module", "backend":
 		return "functional"
+	case "refactor", "refactoring", "maintainability", "code_health", "code_quality":
+		return "refactor"
+	case "technical_debt", "tech_debt", "debt":
+		return "technical_debt"
 	default:
 		return category
 	}
