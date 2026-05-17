@@ -40,7 +40,7 @@ func (t *workflowControlTool) Parameters() map[string]any {
 			"local_key":   map[string]any{"type": "string", "description": "Composite topic/thread key, e.g. -100123:topic:42. Defaults to current local key."},
 			"peer_kind":   map[string]any{"type": "string", "description": "direct or group. Defaults to current peer kind."},
 			"target_repo": map[string]any{"type": "string", "description": "Absolute path of the repository the Skynet workers should edit."},
-			"deploy_repo": map[string]any{"type": "string", "description": "Absolute path of the clean main deployment worktree."},
+			"deploy_repo": map[string]any{"type": "string", "description": "Absolute path of the managed main deployment worktree."},
 			"web_port":    map[string]any{"type": "string", "description": "Local web port for main deployment refreshes."},
 		},
 		"required": []string{"action"},

@@ -38,6 +38,7 @@ const (
 	agentKeyQAIterator         = "skynet-qa-iterator"
 	agentKeyPRComposer         = "skynet-pr-composer"
 	agentKeyFeedbackPlanner    = "skynet-feedback-planner"
+	agentKeyMainSyncer         = "skynet-main-syncer"
 	agentKeyWorktreeJanitor    = "skynet-worktree-janitor"
 	agentKeyRefactorScout      = "skynet-refactor-scout"
 	agentKeyERPUXWalker        = "skynet-erp-ux-walker"
@@ -240,6 +241,7 @@ func (f *SkynetWorkflowsFeature) workflowAgentSpecs(ctx context.Context) []workf
 	uxReviewTools = append(uxReviewTools, "browser", "read_file", "list_files", "exec")
 	refactorScoutTools := append([]string{}, codingTools...)
 	refactorScoutTools = append(refactorScoutTools, "read_file", "list_files", "exec", "memory_search", "memory_get")
+	mainSyncTools := []string{"skynet_workflows", "skynet_main_sync", "message"}
 	targetWorkspace := targetRepo
 	if targetWorkspace == "" {
 		targetWorkspace = safeWorkspace(f.workspace, "skynet-target")
@@ -341,6 +343,18 @@ func (f *SkynetWorkflowsFeature) workflowAgentSpecs(ctx context.Context) []workf
 			Workspace:         targetWorkspace,
 			Tools:             codingTools,
 			Role:              "feedback-planner",
+		},
+		{
+			Key:               agentKeyMainSyncer,
+			DisplayName:       "Skynet Main Syncer",
+			Frontmatter:       "Main deployment reconciler that retries local main sync after missed or failed merge webhooks and preserves dirty deployment drift before updating.",
+			ProviderKind:      storepkg.ProviderClaudeCLI,
+			Model:             modelClaudeSonnet,
+			ReasoningEffort:   reasoningHigh,
+			MaxToolIterations: 8,
+			Workspace:         targetWorkspace,
+			Tools:             mainSyncTools,
+			Role:              "main-syncer",
 		},
 		{
 			Key:               agentKeyWorktreeJanitor,
@@ -565,7 +579,7 @@ Tools:
 - Use skynet_pr for post-QA PR composition and completion tracking.
 - Use skynet_ci_failure only for CI/CD failure intake.
 - Use skynet_pr_conflict only for GitHub PR merge-conflict intake.
-- Use skynet_main_sync only for local main deployment refresh after main branch updates.
+- Use skynet_main_sync only for local main deployment refresh after main branch updates; default dirty_policy "stash" preserves deploy drift before recovery.
 - Use skynet_feedback_plan only for user feedback planning intake.
 - Use skynet_worktree_cleanup only for finished-worktree cleanup.
 
@@ -656,6 +670,14 @@ Operational rules:
 1. Inspect the local deployment or target repo enough to understand the feedback.
 2. Turn the feedback into precise backlog bullets with validation criteria.
 3. Call skynet_backlog with action "add"; do not implement in this role.
+`
+	case "main-syncer":
+		roleRules = `Main sync flow:
+1. Call skynet_workflows with action "status" to confirm the target and deployment repositories.
+2. Call skynet_main_sync with action "trigger", branch "main", start_web true, and dirty_policy "stash".
+3. Treat statuses "already_current", "already_current_restarted", "synced_and_restarted", "synced_after_recovery_and_restarted", and "recovered_dirty_and_restarted" as successful outcomes.
+4. If dirty_recovery is returned, include the stash reference in the report so a human can inspect or recover preserved local changes later.
+5. Do not manually edit, checkout, reset, or delete deployment files. The tool owns deployment recovery.
 `
 	case "worktree-janitor":
 		roleRules = `Worktree janitor flow:
@@ -837,6 +859,12 @@ func (f *SkynetWorkflowsFeature) workflowCronSpecs() []workflowCronSpec {
 			Message:  `Run one Skynet PR composition iteration. Call mcp__goclaw-bridge__skynet_pr with action "next". If an item is returned, inspect the target repository, including worktrees, branches, referenced commits, git stash list, tracked stash diffs, and untracked stash parents such as refs/stash^3. Do not fail as missing work until those locations have been checked; recover scoped artifacts from stash into a clean PR branch when found. Cherry-pick or stage only coherent post-QA changes into a PR branch, verify it, then create or prepare the PR. Never backslash-escape Markdown backtick characters in the PR title or body; prefer gh pr create --body-file from a temporary Markdown file. For important architecture PRs, include Before and After Mermaid diagrams and validate the diagram grammar before publishing. For frontend feature PRs, render the affected route/component and include snapshot/screenshot or equivalent visual evidence with viewport details. Then call mcp__goclaw-bridge__skynet_pr with action "complete" including branch, commits, files, verification, PR URL or PR-ready body, architecture diagrams when required, and frontend visual evidence when applicable. If no pending PR item exists, respond with "No pending PR item."`,
 		},
 		{
+			Name:     "skynet main deployment sync",
+			AgentKey: agentKeyMainSyncer,
+			EveryMS:  15 * 60 * 1000,
+			Message:  `Run one Skynet main deployment reconciliation tick. First call mcp__goclaw-bridge__skynet_workflows action "status" to confirm the configured target_repo, deploy_repo, and web_port. Then call mcp__goclaw-bridge__skynet_main_sync with action "trigger", branch "main", start_web true, and dirty_policy "stash". This is the fallback for missed or failed GitHub push-to-main webhooks. If the tool returns already_current, report that the deployed commit already matched and note the health value. If it returns already_current_restarted, report that the code was current but the web process needed recovery. If it returns dirty_recovery, include the stash reference. Do not manually edit, checkout, reset, delete, or start files/processes outside the tool.`,
+		},
+		{
 			Name:     "skynet worktree cleanup",
 			AgentKey: agentKeyWorktreeJanitor,
 			EveryMS:  60 * 60 * 1000,
@@ -999,7 +1027,7 @@ You can manage these Skynet workflow tools:
 - skynet_workflows: configure/status for the target Telegram channel and repository.
 - skynet_ci_failure: dispatch CI/CD failure repair work to %s.
 - skynet_pr_conflict: dispatch PR merge-conflict resolution work to %s.
-- skynet_main_sync: fast-forward the clean local main deployment worktree and restart the web app.
+- skynet_main_sync: reconcile the local main deployment worktree to origin/main, preserve dirty drift with dirty_policy "stash", and restart the web app when requested.
 - skynet_backlog: add/list/claim/prioritize/refine/complete implementation backlog items; higher priority is claimed first and old low-priority items receive aging boosts; complete queues QA.
 - skynet_experiments: add/list/claim/request review/transition accepted experiments.
 - skynet_change_requests: submit/list/review RED change requests; accepted CRs route to experiments or backlog only after human review.

@@ -76,6 +76,33 @@ func TestWorkflowAgentSpecsIncludesRefactorScout(t *testing.T) {
 	}
 }
 
+func TestWorkflowAgentSpecsIncludesMainSyncer(t *testing.T) {
+	feature := &SkynetWorkflowsFeature{targetRepo: "/repo"}
+	specs := feature.workflowAgentSpecs(context.Background())
+
+	var syncer *workflowAgentSpec
+	for i := range specs {
+		if specs[i].Key == agentKeyMainSyncer {
+			syncer = &specs[i]
+			break
+		}
+	}
+	if syncer == nil {
+		t.Fatal("main syncer spec not registered")
+	}
+	if syncer.DisplayName != "Skynet Main Syncer" {
+		t.Fatalf("DisplayName = %q", syncer.DisplayName)
+	}
+	if syncer.ProviderKind != storepkg.ProviderClaudeCLI || syncer.Model != modelClaudeSonnet || syncer.ReasoningEffort != reasoningHigh {
+		t.Fatalf("provider/model/effort = %q/%q/%q", syncer.ProviderKind, syncer.Model, syncer.ReasoningEffort)
+	}
+	for _, want := range []string{"skynet_workflows", "skynet_main_sync", "message"} {
+		if !stringSliceContains(syncer.Tools, want) {
+			t.Fatalf("main syncer tools missing %q: %#v", want, syncer.Tools)
+		}
+	}
+}
+
 func TestWorkflowCronSpecsIncludesThirtyMinuteRefactorScout(t *testing.T) {
 	feature := &SkynetWorkflowsFeature{}
 	specs := feature.workflowCronSpecs()
@@ -106,6 +133,39 @@ func TestWorkflowCronSpecsIncludesThirtyMinuteRefactorScout(t *testing.T) {
 	} {
 		if !strings.Contains(scout.Message, want) {
 			t.Fatalf("refactor scout cron message missing %q:\n%s", want, scout.Message)
+		}
+	}
+}
+
+func TestWorkflowCronSpecsIncludesMainDeploymentSync(t *testing.T) {
+	feature := &SkynetWorkflowsFeature{}
+	specs := feature.workflowCronSpecs()
+
+	var syncer *workflowCronSpec
+	for i := range specs {
+		if specs[i].Name == "skynet main deployment sync" {
+			syncer = &specs[i]
+			break
+		}
+	}
+	if syncer == nil {
+		t.Fatal("main deployment sync cron spec not registered")
+	}
+	if syncer.AgentKey != agentKeyMainSyncer {
+		t.Fatalf("AgentKey = %q, want %q", syncer.AgentKey, agentKeyMainSyncer)
+	}
+	if syncer.EveryMS != 15*60*1000 {
+		t.Fatalf("EveryMS = %d, want 15 minutes", syncer.EveryMS)
+	}
+	for _, want := range []string{
+		"GitHub push-to-main webhooks",
+		"dirty_policy \"stash\"",
+		"already_current",
+		"dirty_recovery",
+		"Do not manually edit",
+	} {
+		if !strings.Contains(syncer.Message, want) {
+			t.Fatalf("main deployment sync cron message missing %q:\n%s", want, syncer.Message)
 		}
 	}
 }

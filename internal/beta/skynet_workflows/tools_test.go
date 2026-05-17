@@ -303,6 +303,29 @@ func TestRefactorScoutContextIncludesScopeMemoryAndCRRules(t *testing.T) {
 	}
 }
 
+func TestMainSyncerContextIncludesRecoveryRules(t *testing.T) {
+	feature := &SkynetWorkflowsFeature{targetRepo: "/repo"}
+	files := feature.contextFilesForSpec(workflowAgentSpec{
+		DisplayName: "Skynet Main Syncer",
+		Frontmatter: "Main deployment reconciler",
+		Role:        "main-syncer",
+	}, "/repo")
+	content := files[bootstrap.AgentsFile]
+
+	for _, want := range []string{
+		"dirty_policy \"stash\"",
+		"already_current",
+		"already_current_restarted",
+		"synced_after_recovery_and_restarted",
+		"dirty_recovery",
+		"Do not manually edit",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("main syncer context missing %q:\n%s", want, content)
+		}
+	}
+}
+
 func TestBacklogCompleteQueuesQAItem(t *testing.T) {
 	store := newTestFeatureStore(t)
 	tenantID := storepkg.MasterTenantID.String()
@@ -621,6 +644,14 @@ func TestMainSyncInputValidation(t *testing.T) {
 		if safePort(port) {
 			t.Fatalf("port %q should be rejected", port)
 		}
+	}
+	for _, policy := range []string{"", "stash", "auto-stash", "preserve", "fail", "manual"} {
+		if _, err := normalizeMainSyncDirtyPolicy(policy); err != nil {
+			t.Fatalf("dirty policy %q should be accepted: %v", policy, err)
+		}
+	}
+	if _, err := normalizeMainSyncDirtyPolicy("delete"); err == nil {
+		t.Fatal("dirty policy delete should be rejected")
 	}
 	if got := shellQuote("a'b"); got != `'a'"'"'b'` {
 		t.Fatalf("shellQuote() = %q", got)
