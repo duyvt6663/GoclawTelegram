@@ -174,6 +174,75 @@ func TestSyncMainDeploymentCreatesDetachedDeployWorktreeWhenMissing(t *testing.T
 	}
 }
 
+func TestManagedMainWebProcessGroupFromSnapshotFindsOrphanedScreenChild(t *testing.T) {
+	deployRepo := "/Users/example/github/ResearchCrafters-main"
+	logPath := "/tmp/researchcrafters-host-main.log"
+	snapshot := map[string]mainSyncProcess{
+		"38335": {
+			PID:     "38335",
+			PPID:    "1",
+			PGID:    "38335",
+			Command: "login -pflq user /bin/bash -lc cd '/Users/example/github/ResearchCrafters-main' && RC_HOST=127.0.0.1 RC_PORT='3000' ./infra/scripts/host-local.sh >> '/tmp/researchcrafters-host-main.log' 2>&1",
+		},
+		"38336": {
+			PID:     "38336",
+			PPID:    "38335",
+			PGID:    "38335",
+			Command: "bash -lc cd '/Users/example/github/ResearchCrafters-main' && RC_HOST=127.0.0.1 RC_PORT='3000' ./infra/scripts/host-local.sh >> '/tmp/researchcrafters-host-main.log' 2>&1",
+		},
+		"38339": {
+			PID:     "38339",
+			PPID:    "38336",
+			PGID:    "38335",
+			Command: "node /Users/example/.nvm/versions/node/v22/bin/pnpm --filter @researchcrafters/web exec next start -H 127.0.0.1 -p 3000",
+		},
+		"38819": {
+			PID:     "38819",
+			PPID:    "38339",
+			PGID:    "38335",
+			Command: "next-server (v15.5.16)",
+		},
+	}
+
+	pgid, ok := managedMainWebProcessGroupFromSnapshot("38819", snapshot, deployRepo, "3000", "researchcrafters-host-main", logPath)
+	if !ok {
+		t.Fatal("managedMainWebProcessGroupFromSnapshot returned ok=false")
+	}
+	if pgid != "38335" {
+		t.Fatalf("pgid = %q, want 38335", pgid)
+	}
+}
+
+func TestManagedMainWebProcessGroupFromSnapshotRejectsUnrelatedListener(t *testing.T) {
+	snapshot := map[string]mainSyncProcess{
+		"100": {
+			PID:     "100",
+			PPID:    "1",
+			PGID:    "100",
+			Command: "node unrelated-server.js",
+		},
+	}
+
+	if pgid, ok := managedMainWebProcessGroupFromSnapshot("100", snapshot, "/tmp/ResearchCrafters-main", "3000", "researchcrafters-host-main", "/tmp/researchcrafters-host-main.log"); ok {
+		t.Fatalf("managedMainWebProcessGroupFromSnapshot = (%q, true), want unmanaged", pgid)
+	}
+}
+
+func TestParseMainSyncProcessLinePreservesCommand(t *testing.T) {
+	line := "38819 38339 38335 next-server (v15.5.16)"
+
+	proc, ok := parseMainSyncProcessLine(line)
+	if !ok {
+		t.Fatal("parseMainSyncProcessLine returned ok=false")
+	}
+	if proc.PID != "38819" || proc.PPID != "38339" || proc.PGID != "38335" {
+		t.Fatalf("process IDs = %#v", proc)
+	}
+	if proc.Command != "next-server (v15.5.16)" {
+		t.Fatalf("Command = %q", proc.Command)
+	}
+}
+
 func initMainSyncTestRepos(t *testing.T, ctx context.Context) (string, string) {
 	t.Helper()
 	root := t.TempDir()
