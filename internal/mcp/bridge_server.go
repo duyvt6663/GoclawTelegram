@@ -49,13 +49,17 @@ var BridgeToolNames = map[string]bool{
 	// Team tools (context from X-Agent-ID/X-Channel/X-Chat-ID headers)
 	"team_tasks": true,
 	// Skynet workflow beta tools (queue claims, CI intake, feedback planning)
-	"skynet_workflows":     true,
-	"skynet_backlog":       true,
-	"skynet_experiments":   true,
-	"skynet_qa":            true,
-	"skynet_pr":            true,
-	"skynet_ci_failure":    true,
-	"skynet_feedback_plan": true,
+	"skynet_workflows":        true,
+	"skynet_backlog":          true,
+	"skynet_experiments":      true,
+	"skynet_qa":               true,
+	"skynet_pr":               true,
+	"skynet_ci_failure":       true,
+	"skynet_pr_conflict":      true,
+	"skynet_main_sync":        true,
+	"skynet_feedback_plan":    true,
+	"skynet_change_requests":  true,
+	"skynet_worktree_cleanup": true,
 }
 
 // NewBridgeServer creates a StreamableHTTPServer that exposes GoClaw tools as MCP tools.

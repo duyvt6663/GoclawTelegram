@@ -711,7 +711,7 @@ func TestChangeRequestSubmitRequiresReviewAndPublishesRedReminder(t *testing.T) 
 	}
 	result := tool.Execute(context.Background(), map[string]any{
 		"action":    "submit",
-		"text":      "W2 question stack needs clearer progress feedback between writing questions.",
+		"text":      "W2 question stack needs clearer progress feedback between writing questions.\n\n- Observed: users see no progress state.\n- Expected: the stack shows what changed after each generated question.",
 		"route":     "experiment",
 		"category":  "ui_ux",
 		"erp":       "w2-question-stack",
@@ -735,6 +735,11 @@ func TestChangeRequestSubmitRequiresReviewAndPublishesRedReminder(t *testing.T) 
 	}
 	if items[0].Metadata["human_review"] != "required" || items[0].Metadata["suggested_route"] != kindExperiment {
 		t.Fatalf("review metadata = %#v", items[0].Metadata)
+	}
+	for _, want := range []string{"Observed: users see no progress state.", "Expected: the stack shows what changed"} {
+		if !strings.Contains(items[0].Body, want) {
+			t.Fatalf("CR body lost multiline text %q: %s", want, items[0].Body)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
