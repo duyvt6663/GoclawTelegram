@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -387,7 +388,20 @@ func restartMainWeb(ctx context.Context, deployRepo, port, session string) (stri
 	_, _ = runCommand(ctx, "", "screen", "-S", session, "-X", "quit")
 	time.Sleep(1500 * time.Millisecond)
 	if pids := listeningPIDs(ctx, port); pids != "" {
-		return logPath, "blocked_port_in_use", fmt.Errorf("port %s is already in use by unmanaged process(es): %s", port, pids)
+		stoppedGroups, unmanagedPIDs, stopErr := stopManagedMainWebListeners(ctx, deployRepo, port, session, logPath)
+		if stopErr != nil {
+			return logPath, "stop_failed", stopErr
+		}
+		if unmanagedPIDs != "" {
+			return logPath, "blocked_port_in_use", fmt.Errorf("port %s is already in use by unmanaged process(es): %s", port, unmanagedPIDs)
+		}
+		if stoppedGroups != "" {
+			if remaining := waitForPortRelease(ctx, port, 15*time.Second); remaining != "" {
+				return logPath, "blocked_port_in_use", fmt.Errorf("port %s is still in use after stopping managed process group(s) %s: %s", port, stoppedGroups, remaining)
+			}
+		} else {
+			return logPath, "blocked_port_in_use", fmt.Errorf("port %s is already in use by unmanaged process(es): %s", port, pids)
+		}
 	}
 	script := fmt.Sprintf("cd %s && RC_HOST=127.0.0.1 RC_PORT=%s ./infra/scripts/host-local.sh >> %s 2>&1",
 		shellQuote(deployRepo),
@@ -440,11 +454,169 @@ func mainWebHealthAcceptable(health string) bool {
 }
 
 func listeningPIDs(ctx context.Context, port string) string {
+	return strings.Join(listeningPIDList(ctx, port), ",")
+}
+
+func listeningPIDList(ctx context.Context, port string) []string {
 	out, err := runCommand(ctx, "", "lsof", "-tiTCP:"+port, "-sTCP:LISTEN")
 	if err != nil {
-		return ""
+		return nil
 	}
-	return strings.Join(strings.Fields(out), ",")
+	return strings.Fields(out)
+}
+
+func stopManagedMainWebListeners(ctx context.Context, deployRepo, port, session, logPath string) (string, string, error) {
+	listeners := listeningPIDList(ctx, port)
+	if len(listeners) == 0 {
+		return "", "", nil
+	}
+	snapshot, err := mainSyncProcessSnapshot(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	groups := make(map[string]bool)
+	var unmanaged []string
+	for _, pid := range listeners {
+		pgid, ok := managedMainWebProcessGroupFromSnapshot(pid, snapshot, deployRepo, port, session, logPath)
+		if !ok || !safeProcessID(pgid) {
+			unmanaged = append(unmanaged, pid)
+			continue
+		}
+		groups[pgid] = true
+	}
+	if len(unmanaged) > 0 {
+		sort.Strings(unmanaged)
+		return "", strings.Join(unmanaged, ","), nil
+	}
+	groupList := sortedProcessIDs(groups)
+	for _, pgid := range groupList {
+		if _, err := runCommand(ctx, "", "kill", "-TERM", "--", "-"+pgid); err != nil {
+			if _, killErr := runCommand(ctx, "", "kill", "-KILL", "--", "-"+pgid); killErr != nil {
+				return strings.Join(groupList, ","), "", fmt.Errorf("terminate managed process group %s failed: %w; kill fallback failed: %w", pgid, err, killErr)
+			}
+		}
+	}
+	return strings.Join(groupList, ","), "", nil
+}
+
+type mainSyncProcess struct {
+	PID     string
+	PPID    string
+	PGID    string
+	Command string
+}
+
+func mainSyncProcessSnapshot(ctx context.Context) (map[string]mainSyncProcess, error) {
+	out, err := runCommand(ctx, "", "ps", "-axo", "pid=,ppid=,pgid=,command=")
+	if err != nil {
+		return nil, err
+	}
+	processes := make(map[string]mainSyncProcess)
+	for _, line := range strings.Split(out, "\n") {
+		proc, ok := parseMainSyncProcessLine(line)
+		if ok {
+			processes[proc.PID] = proc
+		}
+	}
+	return processes, nil
+}
+
+func parseMainSyncProcessLine(line string) (mainSyncProcess, bool) {
+	fields := strings.Fields(strings.TrimSpace(line))
+	if len(fields) < 4 {
+		return mainSyncProcess{}, false
+	}
+	if !safeProcessID(fields[0]) || !safeProcessID(fields[1]) || !safeProcessID(fields[2]) {
+		return mainSyncProcess{}, false
+	}
+	return mainSyncProcess{
+		PID:     fields[0],
+		PPID:    fields[1],
+		PGID:    fields[2],
+		Command: strings.Join(fields[3:], " "),
+	}, true
+}
+
+func managedMainWebProcessGroupFromSnapshot(listenerPID string, snapshot map[string]mainSyncProcess, deployRepo, port, session, logPath string) (string, bool) {
+	proc, ok := snapshot[listenerPID]
+	if !ok {
+		return "", false
+	}
+	listenerPGID := proc.PGID
+	seen := make(map[string]bool)
+	for depth, pid := 0, listenerPID; depth < 32 && pid != ""; depth++ {
+		if seen[pid] {
+			break
+		}
+		seen[pid] = true
+		proc, ok := snapshot[pid]
+		if !ok {
+			break
+		}
+		if isManagedMainWebCommand(proc.Command, deployRepo, port, session, logPath) {
+			return listenerPGID, true
+		}
+		if proc.PPID == proc.PID || proc.PPID == "0" {
+			break
+		}
+		pid = proc.PPID
+	}
+	for _, proc := range snapshot {
+		if proc.PGID == listenerPGID && isManagedMainWebCommand(proc.Command, deployRepo, port, session, logPath) {
+			return listenerPGID, true
+		}
+	}
+	return "", false
+}
+
+func isManagedMainWebCommand(command, deployRepo, port, session, logPath string) bool {
+	if deployRepo == "" || port == "" || logPath == "" {
+		return false
+	}
+	return strings.Contains(command, deployRepo) &&
+		strings.Contains(command, "host-local.sh") &&
+		strings.Contains(command, "RC_PORT="+shellQuote(port)) &&
+		strings.Contains(command, logPath) &&
+		(session == "" || strings.Contains(logPath, session))
+}
+
+func waitForPortRelease(ctx context.Context, port string, timeout time.Duration) string {
+	deadline := time.Now().Add(timeout)
+	for {
+		pids := listeningPIDs(ctx, port)
+		if pids == "" {
+			return ""
+		}
+		if time.Now().After(deadline) {
+			return pids
+		}
+		select {
+		case <-ctx.Done():
+			return pids
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func safeProcessID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return value != "0"
+}
+
+func sortedProcessIDs(values map[string]bool) []string {
+	ids := make([]string, 0, len(values))
+	for id := range values {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func runCommand(ctx context.Context, dir, name string, args ...string) (string, error) {
