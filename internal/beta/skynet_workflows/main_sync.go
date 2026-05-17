@@ -21,22 +21,29 @@ const (
 	defaultMainSyncBranch  = "main"
 	defaultMainSyncPort    = "3000"
 	defaultMainSyncSession = "researchcrafters-host-main"
+
+	mainSyncDirtyPolicyFail  = "fail"
+	mainSyncDirtyPolicyStash = "stash"
 )
 
 var safeMainSyncBranchRE = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 
 type mainSyncResult struct {
-	Status     string `json:"status"`
-	Branch     string `json:"branch"`
-	Commit     string `json:"commit,omitempty"`
-	OldCommit  string `json:"old_commit,omitempty"`
-	TargetRepo string `json:"target_repo"`
-	DeployRepo string `json:"deploy_repo"`
-	Port       string `json:"port,omitempty"`
-	Session    string `json:"session,omitempty"`
-	LogPath    string `json:"log_path,omitempty"`
-	HealthURL  string `json:"health_url,omitempty"`
-	Health     string `json:"health,omitempty"`
+	Status        string `json:"status"`
+	Branch        string `json:"branch"`
+	Commit        string `json:"commit,omitempty"`
+	OldCommit     string `json:"old_commit,omitempty"`
+	TargetRepo    string `json:"target_repo"`
+	DeployRepo    string `json:"deploy_repo"`
+	Port          string `json:"port,omitempty"`
+	Session       string `json:"session,omitempty"`
+	LogPath       string `json:"log_path,omitempty"`
+	HealthURL     string `json:"health_url,omitempty"`
+	Health        string `json:"health,omitempty"`
+	DirtyPolicy   string `json:"dirty_policy,omitempty"`
+	DirtyStatus   string `json:"dirty_status,omitempty"`
+	DirtyRecovery string `json:"dirty_recovery,omitempty"`
+	SyncMode      string `json:"sync_mode,omitempty"`
 }
 
 type mainSyncTool struct {
@@ -46,7 +53,7 @@ type mainSyncTool struct {
 func (t *mainSyncTool) Name() string { return "skynet_main_sync" }
 
 func (t *mainSyncTool) Description() string {
-	return "Fast-forward a clean local main deployment worktree and optionally restart the local ResearchCrafters web app."
+	return "Reconcile the local main deployment worktree to origin/<branch>, preserving dirty changes when requested, and optionally restart the local ResearchCrafters web app."
 }
 
 func (t *mainSyncTool) Parameters() map[string]any {
@@ -66,10 +73,15 @@ func (t *mainSyncTool) Parameters() map[string]any {
 			"session":     map[string]any{"type": "string", "description": "screen session for the managed web server."},
 			"start_web":   map[string]any{"type": "boolean", "description": "Restart the managed web server after syncing."},
 			"force":       map[string]any{"type": "boolean", "description": "Run even if this branch/commit was already synced."},
-			"channel":     map[string]any{"type": "string"},
-			"chat_id":     map[string]any{"type": "string"},
-			"local_key":   map[string]any{"type": "string"},
-			"peer_kind":   map[string]any{"type": "string"},
+			"dirty_policy": map[string]any{
+				"type":        "string",
+				"enum":        []string{mainSyncDirtyPolicyStash, mainSyncDirtyPolicyFail},
+				"description": "How to handle local deployment worktree changes. Defaults to stash so managed deployment drift can recover without data loss.",
+			},
+			"channel":   map[string]any{"type": "string"},
+			"chat_id":   map[string]any{"type": "string"},
+			"local_key": map[string]any{"type": "string"},
+			"peer_kind": map[string]any{"type": "string"},
 		},
 		"required": []string{"action"},
 	}
@@ -135,21 +147,27 @@ func (f *SkynetWorkflowsFeature) syncMainDeployment(ctx context.Context, args ma
 	if !safeSessionName(session) {
 		return mainSyncResult{}, fmt.Errorf("unsafe screen session name: %q", session)
 	}
+	dirtyPolicy, err := normalizeMainSyncDirtyPolicy(stringArg(args, "dirty_policy"))
+	if err != nil {
+		return mainSyncResult{}, err
+	}
+	force := boolArg(args, "force")
 
-	if !boolArg(args, "force") {
+	if !force {
 		duplicate, err := f.mainSyncAlreadyDone(ctx, args, branch)
 		if err != nil {
 			slog.Warn("skynet main sync dedupe check failed", "error", err)
 		}
 		if duplicate {
 			return mainSyncResult{
-				Status:     "skipped_duplicate",
-				Branch:     branch,
-				Commit:     stringArg(args, "commit"),
-				TargetRepo: targetRepo,
-				DeployRepo: deployRepo,
-				Port:       port,
-				Session:    session,
+				Status:      "skipped_duplicate",
+				Branch:      branch,
+				Commit:      stringArg(args, "commit"),
+				TargetRepo:  targetRepo,
+				DeployRepo:  deployRepo,
+				Port:        port,
+				Session:     session,
+				DirtyPolicy: dirtyPolicy,
 			}, nil
 		}
 	}
@@ -175,19 +193,17 @@ func (f *SkynetWorkflowsFeature) syncMainDeployment(ctx context.Context, args ma
 	if err := ensureDeployWorktree(runCtx, targetRepo, deployRepo, branch); err != nil {
 		return mainSyncResult{}, err
 	}
-	if err := ensureCleanWorktree(runCtx, deployRepo); err != nil {
+	dirtyStatus, dirtyRecovery, err := prepareDeployWorktree(runCtx, deployRepo, branch, dirtyPolicy)
+	if err != nil {
 		return mainSyncResult{}, err
 	}
 	oldCommit, _ := runCommand(runCtx, deployRepo, "git", "rev-parse", "HEAD")
 	oldCommit = strings.TrimSpace(oldCommit)
-	currentBranch, _ := runCommand(runCtx, deployRepo, "git", "branch", "--show-current")
-	if strings.TrimSpace(currentBranch) != branch {
-		return mainSyncResult{}, fmt.Errorf("deployment worktree %s is on branch %q, expected %q", deployRepo, strings.TrimSpace(currentBranch), branch)
-	}
 	if _, err := runCommand(runCtx, deployRepo, "git", "fetch", "origin", branch); err != nil {
 		return mainSyncResult{}, err
 	}
-	if _, err := runCommand(runCtx, deployRepo, "git", "merge", "--ff-only", "origin/"+branch); err != nil {
+	syncMode, err := syncDeployToOrigin(runCtx, deployRepo, branch)
+	if err != nil {
 		return mainSyncResult{}, err
 	}
 	newCommit, err := runCommand(runCtx, deployRepo, "git", "rev-parse", "HEAD")
@@ -201,14 +217,47 @@ func (f *SkynetWorkflowsFeature) syncMainDeployment(ctx context.Context, args ma
 	}
 
 	result := mainSyncResult{
-		Status:     "synced",
-		Branch:     branch,
-		Commit:     newCommit,
-		OldCommit:  oldCommit,
-		TargetRepo: targetRepo,
-		DeployRepo: deployRepo,
-		Port:       port,
-		Session:    session,
+		Status:        "synced",
+		Branch:        branch,
+		Commit:        newCommit,
+		OldCommit:     oldCommit,
+		TargetRepo:    targetRepo,
+		DeployRepo:    deployRepo,
+		Port:          port,
+		Session:       session,
+		DirtyPolicy:   dirtyPolicy,
+		DirtyStatus:   dirtyStatus,
+		DirtyRecovery: dirtyRecovery,
+		SyncMode:      syncMode,
+	}
+	if oldCommit == newCommit && dirtyRecovery == "" && !force {
+		result.Status = "already_current"
+		if boolArg(args, "start_web") {
+			result.HealthURL = "http://127.0.0.1:" + port + "/api/health"
+			result.Health = probeMainWebHealth(runCtx, port)
+			if !mainWebHealthAcceptable(result.Health) {
+				logPath, health, err := restartMainWeb(runCtx, deployRepo, port, session)
+				result.LogPath = logPath
+				result.Health = health
+				if err != nil {
+					f.publishMainSyncLog(ctx, args, origin, result, err)
+					return result, err
+				}
+				result.Status = "already_current_restarted"
+			}
+		}
+		if err := f.markMainSyncDone(ctx, args, branch, newCommit); err != nil {
+			slog.Warn("skynet main sync dedupe mark failed", "error", err)
+		}
+		f.publishMainSyncLog(ctx, args, origin, result, nil)
+		return result, nil
+	}
+	if dirtyRecovery != "" {
+		if oldCommit == newCommit {
+			result.Status = "recovered_dirty"
+		} else {
+			result.Status = "synced_after_recovery"
+		}
 	}
 	if boolArg(args, "start_web") {
 		logPath, health, err := restartMainWeb(runCtx, deployRepo, port, session)
@@ -219,7 +268,7 @@ func (f *SkynetWorkflowsFeature) syncMainDeployment(ctx context.Context, args ma
 			f.publishMainSyncLog(ctx, args, origin, result, err)
 			return result, err
 		}
-		result.Status = "synced_and_restarted"
+		result.Status += "_and_restarted"
 	}
 	if err := f.markMainSyncDone(ctx, args, branch, newCommit); err != nil {
 		slog.Warn("skynet main sync dedupe mark failed", "error", err)
@@ -245,16 +294,15 @@ func ensureDeployWorktree(ctx context.Context, sourceRepo, deployRepo, branch st
 	if err := os.MkdirAll(filepath.Dir(deployRepo), 0o755); err != nil {
 		return err
 	}
-	if _, err := runCommand(ctx, sourceRepo, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
-		_, err = runCommand(ctx, sourceRepo, "git", "worktree", "add", deployRepo, branch)
-		return err
+	if _, err := runCommand(ctx, sourceRepo, "git", "worktree", "add", "--detach", deployRepo, "origin/"+branch); err == nil {
+		return nil
 	}
-	_, err := runCommand(ctx, sourceRepo, "git", "worktree", "add", "-b", branch, deployRepo, "origin/"+branch)
+	_, err := runCommand(ctx, sourceRepo, "git", "worktree", "add", deployRepo, "origin/"+branch)
 	return err
 }
 
 func ensureCleanWorktree(ctx context.Context, repo string) error {
-	status, err := runCommand(ctx, repo, "git", "status", "--porcelain")
+	status, err := gitStatusPorcelain(ctx, repo)
 	if err != nil {
 		return err
 	}
@@ -262,6 +310,76 @@ func ensureCleanWorktree(ctx context.Context, repo string) error {
 		return fmt.Errorf("deployment worktree %s has local changes; refusing to sync:\n%s", repo, strings.TrimSpace(status))
 	}
 	return nil
+}
+
+func prepareDeployWorktree(ctx context.Context, repo, branch, dirtyPolicy string) (string, string, error) {
+	status, err := gitStatusPorcelain(ctx, repo)
+	if err != nil {
+		return "", "", err
+	}
+	status = strings.TrimSpace(status)
+	if status == "" {
+		return "", "", nil
+	}
+	if dirtyPolicy == mainSyncDirtyPolicyFail {
+		return status, "", fmt.Errorf("deployment worktree %s has local changes; refusing to sync:\n%s", repo, status)
+	}
+	recovery, err := stashDirtyWorktree(ctx, repo, branch)
+	if err != nil {
+		return status, "", err
+	}
+	remaining, err := gitStatusPorcelain(ctx, repo)
+	if err != nil {
+		return status, recovery, err
+	}
+	if strings.TrimSpace(remaining) != "" {
+		return status, recovery, fmt.Errorf("deployment worktree %s still has local changes after stash:\n%s", repo, strings.TrimSpace(remaining))
+	}
+	return status, recovery, nil
+}
+
+func gitStatusPorcelain(ctx context.Context, repo string) (string, error) {
+	return runCommand(ctx, repo, "git", "status", "--porcelain")
+}
+
+func stashDirtyWorktree(ctx context.Context, repo, branch string) (string, error) {
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	message := fmt.Sprintf("skynet-main-sync-%s-%s", configKeyPart(branch), stamp)
+	out, err := runCommand(ctx, repo, "git", "stash", "push", "--include-untracked", "-m", message)
+	if err != nil {
+		return "", err
+	}
+	list, listErr := runCommand(ctx, repo, "git", "stash", "list", "--max-count=1")
+	if listErr == nil && strings.TrimSpace(list) != "" {
+		return strings.TrimSpace(list), nil
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func syncDeployToOrigin(ctx context.Context, repo, branch string) (string, error) {
+	target := "origin/" + branch
+	if _, err := runCommand(ctx, repo, "git", "switch", "--detach", target); err == nil {
+		return "detached:" + target, nil
+	} else {
+		switchErr := err
+		if _, checkoutErr := runCommand(ctx, repo, "git", "checkout", "--detach", target); checkoutErr != nil {
+			return "", fmt.Errorf("git switch to %s failed: %w; git checkout fallback failed: %w", target, switchErr, checkoutErr)
+		}
+	}
+	return "detached:" + target, nil
+}
+
+func normalizeMainSyncDirtyPolicy(value string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	switch normalized {
+	case "", mainSyncDirtyPolicyStash, "auto_stash", "preserve", "preserve_stash":
+		return mainSyncDirtyPolicyStash, nil
+	case mainSyncDirtyPolicyFail, "manual", "refuse":
+		return mainSyncDirtyPolicyFail, nil
+	default:
+		return "", fmt.Errorf("unsupported main sync dirty_policy %q; expected %q or %q", value, mainSyncDirtyPolicyStash, mainSyncDirtyPolicyFail)
+	}
 }
 
 func restartMainWeb(ctx context.Context, deployRepo, port, session string) (string, string, error) {
@@ -296,6 +414,29 @@ func restartMainWeb(ctx context.Context, deployRepo, port, session string) (stri
 		time.Sleep(2 * time.Second)
 	}
 	return logPath, "health_pending", nil
+}
+
+func probeMainWebHealth(ctx context.Context, port string) string {
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	healthURL := "http://127.0.0.1:" + port + "/api/health"
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, healthURL, nil)
+	if err != nil {
+		return "health_request_failed"
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "unreachable"
+	}
+	_ = resp.Body.Close()
+	return fmt.Sprintf("http_%d", resp.StatusCode)
+}
+
+func mainWebHealthAcceptable(health string) bool {
+	if !strings.HasPrefix(health, "http_") {
+		return false
+	}
+	return !strings.HasPrefix(health, "http_5")
 }
 
 func listeningPIDs(ctx context.Context, port string) string {
@@ -492,6 +633,9 @@ func mainSyncLogMessage(args map[string]any, result mainSyncResult, runErr error
 		{label: "Commit", value: shortCommit(result.Commit)},
 		{label: "Worktree", value: result.DeployRepo},
 		{label: "Status", value: result.Status},
+		{label: "Sync mode", value: result.SyncMode},
+		{label: "Dirty policy", value: result.DirtyPolicy},
+		{label: "Dirty recovery", value: result.DirtyRecovery},
 		{label: "Health", value: result.Health},
 		{label: "Log", value: result.LogPath},
 		{label: "Compare", value: stringArg(args, "compare_url")},

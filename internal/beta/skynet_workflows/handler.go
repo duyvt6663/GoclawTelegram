@@ -51,22 +51,23 @@ type prConflictRequest struct {
 }
 
 type mainSyncRequest struct {
-	Repository string `json:"repository,omitempty"`
-	Branch     string `json:"branch,omitempty"`
-	Commit     string `json:"commit,omitempty"`
-	Before     string `json:"before,omitempty"`
-	CompareURL string `json:"compare_url,omitempty"`
-	Pusher     string `json:"pusher,omitempty"`
-	TargetRepo string `json:"target_repo,omitempty"`
-	DeployRepo string `json:"deploy_repo,omitempty"`
-	Port       string `json:"port,omitempty"`
-	Session    string `json:"session,omitempty"`
-	StartWeb   bool   `json:"start_web,omitempty"`
-	Channel    string `json:"channel,omitempty"`
-	ChatID     string `json:"chat_id,omitempty"`
-	LocalKey   string `json:"local_key,omitempty"`
-	PeerKind   string `json:"peer_kind,omitempty"`
-	Force      bool   `json:"force,omitempty"`
+	Repository  string `json:"repository,omitempty"`
+	Branch      string `json:"branch,omitempty"`
+	Commit      string `json:"commit,omitempty"`
+	Before      string `json:"before,omitempty"`
+	CompareURL  string `json:"compare_url,omitempty"`
+	Pusher      string `json:"pusher,omitempty"`
+	TargetRepo  string `json:"target_repo,omitempty"`
+	DeployRepo  string `json:"deploy_repo,omitempty"`
+	Port        string `json:"port,omitempty"`
+	Session     string `json:"session,omitempty"`
+	StartWeb    bool   `json:"start_web,omitempty"`
+	DirtyPolicy string `json:"dirty_policy,omitempty"`
+	Channel     string `json:"channel,omitempty"`
+	ChatID      string `json:"chat_id,omitempty"`
+	LocalKey    string `json:"local_key,omitempty"`
+	PeerKind    string `json:"peer_kind,omitempty"`
+	Force       bool   `json:"force,omitempty"`
 }
 
 type feedbackRequest struct {
@@ -214,18 +215,19 @@ func (h *handler) handleMainSync(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	args := map[string]any{
-		"repository":  req.Repository,
-		"branch":      req.Branch,
-		"commit":      req.Commit,
-		"before":      req.Before,
-		"compare_url": req.CompareURL,
-		"pusher":      req.Pusher,
-		"target_repo": req.TargetRepo,
-		"deploy_repo": req.DeployRepo,
-		"port":        req.Port,
-		"session":     req.Session,
-		"start_web":   req.StartWeb,
-		"force":       req.Force,
+		"repository":   req.Repository,
+		"branch":       req.Branch,
+		"commit":       req.Commit,
+		"before":       req.Before,
+		"compare_url":  req.CompareURL,
+		"pusher":       req.Pusher,
+		"target_repo":  req.TargetRepo,
+		"deploy_repo":  req.DeployRepo,
+		"port":         req.Port,
+		"session":      req.Session,
+		"start_web":    req.StartWeb,
+		"dirty_policy": req.DirtyPolicy,
+		"force":        req.Force,
 	}
 	origin := workflowOrigin{
 		Channel:  req.Channel,
