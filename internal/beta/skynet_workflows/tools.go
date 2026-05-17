@@ -894,7 +894,7 @@ func (t *boardTool) submitChangeRequest(ctx context.Context, tenantID string, ar
 		metadata["deployment_url"] = deploymentURL
 	}
 
-	items, err := t.feature.store.addItems(tenantID, kindChangeReq, parseBulletItems(text), originFromToolContext(ctx, args), stringArg(args, "source"), metadata)
+	items, err := t.feature.store.addItems(tenantID, kindChangeReq, []string{strings.TrimSpace(text)}, originFromToolContext(ctx, args), stringArg(args, "source"), metadata)
 	if err != nil {
 		return tools.ErrorResult(err.Error())
 	}

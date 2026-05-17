@@ -10,7 +10,11 @@ func TestBridgeToolNamesIncludesSkynetWorkflowTools(t *testing.T) {
 		"skynet_qa",
 		"skynet_pr",
 		"skynet_ci_failure",
+		"skynet_pr_conflict",
+		"skynet_main_sync",
 		"skynet_feedback_plan",
+		"skynet_change_requests",
+		"skynet_worktree_cleanup",
 	} {
 		if !BridgeToolNames[name] {
 			t.Fatalf("BridgeToolNames is missing %q", name)
