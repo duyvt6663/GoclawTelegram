@@ -38,6 +38,8 @@ const (
 	agentKeyQAIterator         = "skynet-qa-iterator"
 	agentKeyPRComposer         = "skynet-pr-composer"
 	agentKeyFeedbackPlanner    = "skynet-feedback-planner"
+	agentKeyWorktreeJanitor    = "skynet-worktree-janitor"
+	agentKeyERPUXWalker        = "skynet-erp-ux-walker"
 
 	providerNameSkynetClaudeCLI = "skynet-claude-cli"
 
@@ -45,6 +47,7 @@ const (
 	modelClaudeOpus47 = "claude-opus-4-7"
 	modelCodex54      = "gpt-5.4"
 	reasoningHigh     = "high"
+	reasoningXHigh    = "xhigh"
 )
 
 var skynetWorkflowTools = []string{
@@ -57,6 +60,8 @@ var skynetWorkflowTools = []string{
 	"skynet_pr_conflict",
 	"skynet_main_sync",
 	"skynet_feedback_plan",
+	"skynet_change_requests",
+	"skynet_worktree_cleanup",
 }
 
 type SkynetWorkflowsFeature struct {
@@ -132,10 +137,12 @@ func (f *SkynetWorkflowsFeature) Init(deps beta.Deps) error {
 		deps.ToolRegistry.Register(&boardTool{feature: f, name: "skynet_experiments", kind: kindExperiment})
 		deps.ToolRegistry.Register(&boardTool{feature: f, name: "skynet_qa", kind: kindQA})
 		deps.ToolRegistry.Register(&boardTool{feature: f, name: "skynet_pr", kind: kindPR})
+		deps.ToolRegistry.Register(&boardTool{feature: f, name: "skynet_change_requests", kind: kindChangeReq})
 		deps.ToolRegistry.Register(&ciFailureTool{feature: f})
 		deps.ToolRegistry.Register(&prConflictTool{feature: f})
 		deps.ToolRegistry.Register(&mainSyncTool{feature: f})
 		deps.ToolRegistry.Register(&feedbackPlanTool{feature: f})
+		deps.ToolRegistry.Register(&worktreeCleanupTool{feature: f})
 	}
 	if deps.Server != nil {
 		deps.Server.AddRouteRegistrar(&handler{feature: f})
@@ -228,6 +235,8 @@ func (f *SkynetWorkflowsFeature) workflowAgentSpecs(ctx context.Context) []workf
 	targetRepo := f.resolveTargetRepo(ctx)
 	codingTools := append([]string{}, skynetWorkflowTools...)
 	codingTools = append(codingTools, "message")
+	uxReviewTools := append([]string{}, codingTools...)
+	uxReviewTools = append(uxReviewTools, "browser", "read_file", "list_files", "exec")
 	targetWorkspace := targetRepo
 	if targetWorkspace == "" {
 		targetWorkspace = safeWorkspace(f.workspace, "skynet-target")
@@ -329,6 +338,30 @@ func (f *SkynetWorkflowsFeature) workflowAgentSpecs(ctx context.Context) []workf
 			Workspace:         targetWorkspace,
 			Tools:             codingTools,
 			Role:              "feedback-planner",
+		},
+		{
+			Key:               agentKeyWorktreeJanitor,
+			DisplayName:       "Skynet Worktree Janitor",
+			Frontmatter:       "Repository hygiene worker that removes clean git worktrees whose commits are already contained in the configured base branch.",
+			ProviderKind:      storepkg.ProviderClaudeCLI,
+			Model:             modelClaudeSonnet,
+			ReasoningEffort:   reasoningHigh,
+			MaxToolIterations: 8,
+			Workspace:         targetWorkspace,
+			Tools:             []string{"skynet_worktree_cleanup", "message"},
+			Role:              "worktree-janitor",
+		},
+		{
+			Key:               agentKeyERPUXWalker,
+			DisplayName:       "Skynet ERP UX Walker",
+			Frontmatter:       "Daily ERP walkthrough reviewer that exercises one deployed ERP end-to-end, evaluates UI/UX and system gaps, and submits human-reviewed change requests.",
+			ProviderKind:      storepkg.ProviderClaudeCLI,
+			Model:             modelClaudeOpus47,
+			ReasoningEffort:   reasoningXHigh,
+			MaxToolIterations: 45,
+			Workspace:         targetWorkspace,
+			Tools:             uxReviewTools,
+			Role:              "erp-ux-walker",
 		},
 	}
 }
@@ -498,7 +531,9 @@ func workflowToolNameHint() string {
 - %s for skynet_pr_conflict
 - %s for skynet_main_sync
 - %s for skynet_feedback_plan
-`, mcpToolName("skynet_backlog"), mcpToolName("skynet_experiments"), mcpToolName("skynet_qa"), mcpToolName("skynet_pr"), mcpToolName("skynet_ci_failure"), mcpToolName("skynet_pr_conflict"), mcpToolName("skynet_main_sync"), mcpToolName("skynet_feedback_plan"))
+- %s for skynet_change_requests
+- %s for skynet_worktree_cleanup
+`, mcpToolName("skynet_backlog"), mcpToolName("skynet_experiments"), mcpToolName("skynet_qa"), mcpToolName("skynet_pr"), mcpToolName("skynet_ci_failure"), mcpToolName("skynet_pr_conflict"), mcpToolName("skynet_main_sync"), mcpToolName("skynet_feedback_plan"), mcpToolName("skynet_change_requests"), mcpToolName("skynet_worktree_cleanup"))
 }
 
 func (f *SkynetWorkflowsFeature) contextFilesForSpec(spec workflowAgentSpec, workspace string) map[string]string {
@@ -510,12 +545,14 @@ Managed workflow feature: %s
 Tools:
 - Use skynet_backlog for implementation queue items.
 - Use skynet_experiments for experiment queue items and channel review transitions.
+- Use skynet_change_requests for human-reviewed change requests; CRs must be approved before they route to experiments or backlog.
 - Use skynet_qa for QA queue items and QA-to-backlog transitions.
 - Use skynet_pr for post-QA PR composition and completion tracking.
 - Use skynet_ci_failure only for CI/CD failure intake.
 - Use skynet_pr_conflict only for GitHub PR merge-conflict intake.
 - Use skynet_main_sync only for local main deployment refresh after main branch updates.
 - Use skynet_feedback_plan only for user feedback planning intake.
+- Use skynet_worktree_cleanup only for finished-worktree cleanup.
 
 %s
 
@@ -525,7 +562,7 @@ Operational rules:
 - Do not treat planning/decomposition as implementation failure. If a backlog item is a milestone, rollup, stale note, or lacks acceptance criteria, use the queue's refinement transition and create implementation-sized child bullets.
 - Keep changes scoped to the target repository and verify with the local test/build commands you can run.
 - Update the queue item status with the matching Skynet tool before ending the run.
-- GoClaw mirrors active workflow-only backlog/experiment/QA/PR items into backlog/99-skynet-workflow-queue.md in the target repo for visibility. Treat it as generated reference; use Skynet tools for state changes.
+- GoClaw mirrors active workflow-only change-request/backlog/experiment/QA/PR items into backlog/99-skynet-workflow-queue.md in the target repo for visibility. Treat it as generated reference; use Skynet tools for state changes.
 `, targetRepo, workspace, featureName, workflowToolNameHint())
 
 	role := spec.Role
@@ -602,6 +639,20 @@ Operational rules:
 1. Inspect the local deployment or target repo enough to understand the feedback.
 2. Turn the feedback into precise backlog bullets with validation criteria.
 3. Call skynet_backlog with action "add"; do not implement in this role.
+`
+	case "worktree-janitor":
+		roleRules = `Worktree janitor flow:
+1. Call skynet_worktree_cleanup with action "run", base_branch "main", and the configured target repository.
+2. Do not remove files or directories manually. The cleanup tool only removes clean, unlocked worktrees whose HEAD is already contained in the base branch.
+3. Report removed and skipped worktrees. Skipped dirty, locked, protected, unmerged, or detached worktrees are not failures.
+`
+	case "erp-ux-walker":
+		roleRules = `ERP UX walkthrough flow:
+1. Before opening the website, call skynet_workflows status for the target repo/deployment settings, then inspect incoming work that may affect UI/UX: list skynet_change_requests in review, skynet_experiments in review/pending, skynet_backlog pending items with UI/UX wording, and skynet_qa pending UI-facing items. Use this to avoid duplicate CRs or conflicting product decisions.
+2. Pick one ERP/package on the deployed website and play through it end-to-end with the browser. Evaluate actual interaction quality, copy, layout, responsiveness, accessibility cues, and whether system modules support the intended ERP flow.
+3. When you find a gap, submit it through skynet_change_requests with action "submit"; use route "experiment" and category "ui_ux" for UI/UX questions, or route "backlog" and category "functional" for functional-only module/system gaps.
+4. Do not write directly to skynet_experiments or skynet_backlog from this role. Human review of the RED change request must happen first.
+5. Include ERP slug, deployment URL, observed steps, expected behavior, actual behavior, suggested route, and why this is not a duplicate of existing work.
 `
 	}
 
@@ -752,6 +803,12 @@ func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
 			Message:  `Run one Skynet experiment review reminder. Call mcp__goclaw-bridge__skynet_experiments with action "review_reminders" and limit 10. Do not validate, revise, approve, or implement any experiment in this reminder tick. If no review item exists, respond with "No experiment reviews awaiting action."`,
 		},
 		{
+			Name:     "skynet change request review reminder",
+			AgentKey: agentKeyERPUXWalker,
+			EveryMS:  5 * 60 * 1000,
+			Message:  `Run one Skynet RED change-request review reminder. Call mcp__goclaw-bridge__skynet_change_requests with action "review_reminders" and limit 10. Do not approve, revise, route, validate, or implement any CR in this reminder tick. If no review item exists, respond with "No change requests awaiting review."`,
+		},
+		{
 			Name:     "skynet qa iterator",
 			AgentKey: agentKeyQAIterator,
 			EveryMS:  5 * 60 * 1000,
@@ -762,6 +819,18 @@ func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
 			AgentKey: agentKeyPRComposer,
 			EveryMS:  10 * 60 * 1000,
 			Message:  `Run one Skynet PR composition iteration. Call mcp__goclaw-bridge__skynet_pr with action "next". If an item is returned, inspect the target repository, including worktrees, branches, referenced commits, git stash list, tracked stash diffs, and untracked stash parents such as refs/stash^3. Do not fail as missing work until those locations have been checked; recover scoped artifacts from stash into a clean PR branch when found. Cherry-pick or stage only coherent post-QA changes into a PR branch, verify it, then create or prepare the PR. Never backslash-escape Markdown backtick characters in the PR title or body; prefer gh pr create --body-file from a temporary Markdown file. For important architecture PRs, include Before and After Mermaid diagrams and validate the diagram grammar before publishing. For frontend feature PRs, render the affected route/component and include snapshot/screenshot or equivalent visual evidence with viewport details. Then call mcp__goclaw-bridge__skynet_pr with action "complete" including branch, commits, files, verification, PR URL or PR-ready body, architecture diagrams when required, and frontend visual evidence when applicable. If no pending PR item exists, respond with "No pending PR item."`,
+		},
+		{
+			Name:     "skynet worktree cleanup",
+			AgentKey: agentKeyWorktreeJanitor,
+			EveryMS:  60 * 60 * 1000,
+			Message:  `Run one Skynet worktree cleanup. Call mcp__goclaw-bridge__skynet_worktree_cleanup with action "run", base_branch "main", and remove_branches false. Do not manually delete files or directories. Report removed worktrees and skipped worktrees with reasons.`,
+		},
+		{
+			Name:     "skynet erp ux walkthrough",
+			AgentKey: agentKeyERPUXWalker,
+			EveryMS:  24 * 60 * 60 * 1000,
+			Message:  `Run one daily Skynet ERP UX walkthrough with Claude Opus 4.7 xhigh. First call mcp__goclaw-bridge__skynet_workflows action "status" for target repo and web_port, then inspect incoming UI/UX-affecting work so you do not duplicate decisions: call mcp__goclaw-bridge__skynet_change_requests list status "review", mcp__goclaw-bridge__skynet_experiments list, mcp__goclaw-bridge__skynet_backlog list status "pending" limit 50, and mcp__goclaw-bridge__skynet_qa list status "pending" limit 20. Then use the browser against the configured local deployment and play through one ERP end-to-end, evaluating UI, UX, copy, layout, responsiveness, accessibility cues, and module/system support gaps. For every gap, call mcp__goclaw-bridge__skynet_change_requests action "submit"; route UI/UX questions to "experiment" with category "ui_ux", and functional-only gaps to "backlog" with category "functional". Do not write directly to experiments or backlog; RED change-request review must precede both.`,
 		},
 	}
 
@@ -823,7 +892,7 @@ func (f *SkynetWorkflowsFeature) ensureSkynetBotAccess(ctx context.Context) erro
 			TenantID:            storepkg.MasterTenantID,
 			AgentKey:            agentKeySkynet,
 			DisplayName:         "Skynet",
-			Frontmatter:         "Skynet orchestration bot for CI failures, PR conflicts, backlog, experiments, QA, PR composition, and feedback planning.",
+			Frontmatter:         "Skynet orchestration bot for CI failures, PR conflicts, backlog, experiments, change requests, QA, PR composition, and feedback planning.",
 			OwnerID:             "system",
 			Provider:            provider.Name,
 			Model:               modelCodex54,
@@ -895,11 +964,13 @@ You can manage these Skynet workflow tools:
 - skynet_main_sync: fast-forward the clean local main deployment worktree and restart the web app.
 - skynet_backlog: add/list/claim/refine/complete implementation backlog items; complete queues QA.
 - skynet_experiments: add/list/claim/request review/transition accepted experiments.
+- skynet_change_requests: submit/list/review RED change requests; accepted CRs route to experiments or backlog only after human review.
 - skynet_qa: add/list/claim/pass/fail QA items; pass queues PR composition.
 - skynet_pr: add/list/claim/complete/fail post-QA PR composition items.
 - skynet_feedback_plan: turn user feedback into backlog items through %s.
+- skynet_worktree_cleanup: clean finished git worktrees through the safe cleanup tool.
 
-When users post CI failures, PR conflicts, main deployment refresh requests, feedback, backlog bullets, experiment bullets, or QA bullets, call the matching tool instead of only replying in prose.
+When users post CI failures, PR conflicts, main deployment refresh requests, feedback, backlog bullets, experiment bullets, change requests, worktree cleanup requests, or QA bullets, call the matching tool instead of only replying in prose.
 `, agentKeyCIFixer, agentKeyPRConflictResolver, agentKeyFeedbackPlanner)
 	return f.agentStore.SetAgentContextFile(ctx, agentData.ID, "SKYNET_WORKFLOWS.md", content)
 }

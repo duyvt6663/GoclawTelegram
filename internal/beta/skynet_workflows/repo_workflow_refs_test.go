@@ -47,6 +47,18 @@ func TestRepoWorkflowReferenceMirrorsGeneratedItemsAndSkipsRepoBacklog(t *testin
 	if err != nil {
 		t.Fatalf("add QA item: %v", err)
 	}
+	changeRequestItems, err := store.addItems(tenantID, kindChangeReq, []string{"Review whether question stack stage navigation needs a UI experiment"}, workflowOrigin{}, "erp-ux-walker", map[string]string{
+		"suggested_route": kindExperiment,
+		"human_review":    "required",
+	})
+	if err != nil {
+		t.Fatalf("add change request item: %v", err)
+	}
+	if _, err := store.updateStatus(tenantID, changeRequestItems[0].ID, statusReview, "awaiting human review", map[string]string{
+		"transition": "change_request_review_requested",
+	}); err != nil {
+		t.Fatalf("mark change request review: %v", err)
+	}
 
 	feature := &SkynetWorkflowsFeature{store: store, targetRepo: repo}
 	if err := feature.writeRepoWorkflowReference(context.Background(), tenantID); err != nil {
@@ -64,9 +76,12 @@ func TestRepoWorkflowReferenceMirrorsGeneratedItemsAndSkipsRepoBacklog(t *testin
 		backlogItems[0].ID,
 		experimentItems[0].ID,
 		qaItems[0].ID,
+		changeRequestItems[0].ID,
+		"Review whether question stack stage navigation needs a UI experiment",
 		"Implement `QuestionStackEditor`",
 		"Experiment leaf: validate question stack review",
 		"Verify backlog-completed question stack work",
+		"## Change Request",
 	} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("generated reference missing %q:\n%s", want, content)

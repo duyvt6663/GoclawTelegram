@@ -90,7 +90,7 @@ func renderRepoWorkflowReference(items []workflowItem) string {
 		return b.String()
 	}
 
-	kinds := []string{kindBacklog, kindExperiment, kindQA, kindPR}
+	kinds := []string{kindChangeReq, kindBacklog, kindExperiment, kindQA, kindPR}
 	statuses := []string{statusPending, statusInProgress, statusReview, statusRefinement, statusFailed}
 	for _, kind := range kinds {
 		kindItems := filterReferenceItems(items, kind, "")
