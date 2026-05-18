@@ -818,6 +818,8 @@ type workflowCronSpec struct {
 	AgentKey string
 	EveryMS  int64
 	Message  string
+	Tool     string
+	Args     map[string]any
 }
 
 func (f *SkynetWorkflowsFeature) workflowCronSpecs() []workflowCronSpec {
@@ -835,16 +837,22 @@ func (f *SkynetWorkflowsFeature) workflowCronSpecs() []workflowCronSpec {
 			Message:  `Run one Skynet experiment iteration. Call mcp__goclaw-bridge__skynet_experiments with action "next". This syncs repo experiments from apps/web/experiments when the queue is empty. If an item is returned, read its README/Mock/registry context, build or validate the experiment, then call mcp__goclaw-bridge__skynet_experiments with action "request_review". If no pending item exists, respond with "No pending experiment item."`,
 		},
 		{
-			Name:     "skynet experiment review reminder",
-			AgentKey: agentKeyExperimentIterator,
-			EveryMS:  5 * 60 * 1000,
-			Message:  `Run one Skynet experiment review reminder. Call mcp__goclaw-bridge__skynet_experiments with action "review_reminders" and limit 10. Do not validate, revise, approve, or implement any experiment in this reminder tick. If no review item exists, respond with "No experiment reviews awaiting action."`,
+			Name:    "skynet experiment review reminder",
+			EveryMS: 5 * 60 * 1000,
+			Tool:    "skynet_experiments",
+			Args: map[string]any{
+				"action": "review_reminders",
+				"limit":  10,
+			},
 		},
 		{
-			Name:     "skynet change request review reminder",
-			AgentKey: agentKeyERPUXWalker,
-			EveryMS:  5 * 60 * 1000,
-			Message:  `Run one Skynet RED change-request review reminder. Call mcp__goclaw-bridge__skynet_change_requests with action "review_reminders" and limit 10. Do not approve, revise, route, validate, or implement any CR in this reminder tick. If no review item exists, respond with "No change requests awaiting review."`,
+			Name:    "skynet change request review reminder",
+			EveryMS: 5 * 60 * 1000,
+			Tool:    "skynet_change_requests",
+			Args: map[string]any{
+				"action": "review_reminders",
+				"limit":  10,
+			},
 		},
 		{
 			Name:     "skynet qa iterator",
@@ -885,6 +893,20 @@ func (f *SkynetWorkflowsFeature) workflowCronSpecs() []workflowCronSpec {
 	}
 }
 
+func (spec workflowCronSpec) payload() storepkg.CronPayload {
+	if spec.Tool != "" {
+		return storepkg.CronPayload{
+			Kind: "tool_call",
+			Tool: spec.Tool,
+			Args: spec.Args,
+		}
+	}
+	return storepkg.CronPayload{
+		Kind:    "agent_turn",
+		Message: spec.Message,
+	}
+}
+
 func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
 	if f.cronStore == nil {
 		return nil
@@ -902,8 +924,11 @@ func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
 
 	jobs := f.cronStore.ListJobs(ctx, true, "", "")
 	for _, spec := range specs {
-		agentID := agentIDs[spec.AgentKey]
-		if agentID == "" {
+		agentID := ""
+		if spec.AgentKey != "" {
+			agentID = agentIDs[spec.AgentKey]
+		}
+		if spec.AgentKey != "" && agentID == "" {
 			continue
 		}
 		schedule := everySchedule(spec.EveryMS)
@@ -911,6 +936,14 @@ func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
 		// meaningful channel updates; cron delivery would spam no-op responses.
 		deliver := false
 		deliverTo := ""
+		if spec.Tool != "" {
+			if target.LocalKey != "" {
+				deliverTo = target.LocalKey
+			} else {
+				deliverTo = target.ChatID
+			}
+		}
+		payload := spec.payload()
 
 		var existing *storepkg.CronJob
 		for i := range jobs {
@@ -924,11 +957,25 @@ func (f *SkynetWorkflowsFeature) ensureCronJobs(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			continue
+			jobs = f.cronStore.ListJobs(ctx, true, "", "")
+			for i := range jobs {
+				if strings.EqualFold(jobs[i].Name, spec.Name) {
+					existing = &jobs[i]
+					break
+				}
+			}
+			if existing == nil {
+				continue
+			}
+		}
+		agentPatch := agentID
+		if spec.Tool != "" {
+			agentPatch = ""
 		}
 		_, err := f.cronStore.UpdateJob(ctx, existing.ID, storepkg.CronJobPatch{
-			AgentID:        stringPtr(agentID),
+			AgentID:        stringPtr(agentPatch),
 			Schedule:       &schedule,
+			Payload:        &payload,
 			Message:        spec.Message,
 			Enabled:        boolPtr(true),
 			UserID:         stringPtr(""),

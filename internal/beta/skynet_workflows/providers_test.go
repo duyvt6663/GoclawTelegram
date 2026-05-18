@@ -137,6 +137,44 @@ func TestWorkflowCronSpecsIncludesThirtyMinuteRefactorScout(t *testing.T) {
 	}
 }
 
+func TestWorkflowCronSpecsUseDirectToolCallsForReviewReminders(t *testing.T) {
+	feature := &SkynetWorkflowsFeature{}
+	specs := feature.workflowCronSpecs()
+
+	expected := map[string]string{
+		"skynet experiment review reminder":     "skynet_experiments",
+		"skynet change request review reminder": "skynet_change_requests",
+	}
+	for name, toolName := range expected {
+		var spec *workflowCronSpec
+		for i := range specs {
+			if specs[i].Name == name {
+				spec = &specs[i]
+				break
+			}
+		}
+		if spec == nil {
+			t.Fatalf("%s cron spec not registered", name)
+		}
+		if spec.AgentKey != "" {
+			t.Fatalf("%s AgentKey = %q, want direct tool call with no agent", name, spec.AgentKey)
+		}
+		if spec.Tool != toolName {
+			t.Fatalf("%s Tool = %q, want %q", name, spec.Tool, toolName)
+		}
+		if spec.EveryMS != 5*60*1000 {
+			t.Fatalf("%s EveryMS = %d, want 5 minutes", name, spec.EveryMS)
+		}
+		payload := spec.payload()
+		if payload.Kind != "tool_call" || payload.Tool != toolName {
+			t.Fatalf("%s payload = %#v, want direct %s tool_call", name, payload, toolName)
+		}
+		if payload.Args["action"] != "review_reminders" || payload.Args["limit"] != 10 {
+			t.Fatalf("%s payload args = %#v, want review_reminders limit 10", name, payload.Args)
+		}
+	}
+}
+
 func TestWorkflowCronSpecsIncludesMainDeploymentSync(t *testing.T) {
 	feature := &SkynetWorkflowsFeature{}
 	specs := feature.workflowCronSpecs()

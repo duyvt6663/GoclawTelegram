@@ -48,9 +48,11 @@ type CronSchedule struct {
 
 // CronPayload describes what a job does when triggered.
 type CronPayload struct {
-	Kind    string `json:"kind"`
-	Message string `json:"message"`
-	Command string `json:"command,omitempty"`
+	Kind    string         `json:"kind"`
+	Message string         `json:"message"`
+	Command string         `json:"command,omitempty"`
+	Tool    string         `json:"tool,omitempty"`
+	Args    map[string]any `json:"args,omitempty"`
 }
 
 // CronJobState tracks runtime state for a job.
@@ -88,6 +90,7 @@ type CronJobPatch struct {
 	UserID         *string       `json:"userId,omitempty"`
 	Enabled        *bool         `json:"enabled,omitempty"`
 	Schedule       *CronSchedule `json:"schedule,omitempty"`
+	Payload        *CronPayload  `json:"payload,omitempty"`
 	Message        string        `json:"message,omitempty"`
 	DeleteAfterRun *bool         `json:"deleteAfterRun,omitempty"`
 	Stateless      *bool         `json:"stateless,omitempty"`

@@ -106,7 +106,13 @@ func (s *PGCronStore) UpdateJob(ctx context.Context, jobID string, patch store.C
 		updates["wake_heartbeat"] = *patch.WakeHeartbeat
 	}
 
-	if patch.Message != "" {
+	if patch.Payload != nil {
+		mergedPayload, err := json.Marshal(patch.Payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal payload for job %s: %w", jobID, err)
+		}
+		updates["payload"] = mergedPayload
+	} else if patch.Message != "" {
 		payload := current.Payload
 		payload.Message = patch.Message
 		mergedPayload, err := json.Marshal(payload)
