@@ -11,6 +11,7 @@ import (
 	"github.com/nextlevelbuilder/goclaw/internal/scheduler"
 	"github.com/nextlevelbuilder/goclaw/internal/sessions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
+	toolspkg "github.com/nextlevelbuilder/goclaw/internal/tools"
 )
 
 type trackingCronSessionStore struct {
@@ -48,7 +49,7 @@ func TestCronHandlerResetsStatelessSessions(t *testing.T) {
 	)
 	defer sched.Stop()
 
-	handler := makeCronJobHandler(sched, bus.New(), &config.Config{}, nil, sessStore, nil)
+	handler := makeCronJobHandler(sched, bus.New(), &config.Config{}, nil, sessStore, nil, nil)
 	job := &store.CronJob{
 		ID:        "job-1",
 		TenantID:  store.MasterTenantID,
@@ -85,7 +86,7 @@ func TestCronHandlerKeepsStatefulSessions(t *testing.T) {
 	)
 	defer sched.Stop()
 
-	handler := makeCronJobHandler(sched, bus.New(), &config.Config{}, nil, sessStore, nil)
+	handler := makeCronJobHandler(sched, bus.New(), &config.Config{}, nil, sessStore, nil, nil)
 	job := &store.CronJob{
 		ID:        "job-2",
 		TenantID:  store.MasterTenantID,
@@ -105,4 +106,59 @@ func TestCronHandlerKeepsStatefulSessions(t *testing.T) {
 	if sessStore.saves != 0 {
 		t.Fatalf("Save calls = %d, want 0", sessStore.saves)
 	}
+}
+
+func TestCronHandlerRunsToolCallWithoutScheduler(t *testing.T) {
+	toolsReg := toolspkg.NewRegistry()
+	tool := &cronTestTool{}
+	toolsReg.Register(tool)
+
+	handler := makeCronJobHandler(nil, bus.New(), &config.Config{}, nil, newTrackingCronSessionStore(), nil, toolsReg)
+	job := &store.CronJob{
+		ID:             "job-tool",
+		TenantID:       store.MasterTenantID,
+		Name:           "direct reminder",
+		DeliverChannel: "builder-bot",
+		DeliverTo:      "-1003865644303:topic:37674",
+		Payload: store.CronPayload{
+			Kind: "tool_call",
+			Tool: "cron_test_tool",
+			Args: map[string]any{
+				"action":    "review_reminders",
+				"local_key": "-1003865644303:topic:37674",
+			},
+		},
+	}
+
+	result, err := handler(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "direct:review_reminders" {
+		t.Fatalf("Content = %q, want direct tool result", result.Content)
+	}
+	if tool.channel != "builder-bot" {
+		t.Fatalf("tool channel = %q, want builder-bot", tool.channel)
+	}
+	if tool.localKey != "-1003865644303:topic:37674" {
+		t.Fatalf("tool local key = %q, want configured topic key", tool.localKey)
+	}
+}
+
+type cronTestTool struct {
+	channel  string
+	localKey string
+}
+
+func (t *cronTestTool) Name() string { return "cron_test_tool" }
+
+func (t *cronTestTool) Description() string { return "test cron tool" }
+
+func (t *cronTestTool) Parameters() map[string]any { return nil }
+
+func (t *cronTestTool) Execute(ctx context.Context, args map[string]any) *toolspkg.Result {
+	t.channel = toolspkg.ToolChannelFromCtx(ctx)
+	t.localKey = toolspkg.ToolLocalKeyFromCtx(ctx)
+	action, _ := args["action"].(string)
+	return toolspkg.NewResult("direct:" + action)
 }
